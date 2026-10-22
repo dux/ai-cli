@@ -25,12 +25,13 @@ use alacritty_terminal::vte::ansi::{Processor, Timeout};
 use crate::awake::Awake;
 use crate::cli::RunOpts;
 use crate::keys::{self, KeyBuffer};
-use crate::pane::Pane;
+use crate::pane::{self, Pane};
 use crate::probe::{self, Outer};
 use crate::render::Renderer;
 use crate::scan::Scan;
 use crate::term::{self, RawMode, Size};
-use crate::{bang, handoff};
+use crate::turn::{self, Turn};
+use crate::{bang, config, handoff};
 
 /// The child keeps at least this many rows whatever the bar shows.
 const MIN_CHILD: usize = 5;
@@ -110,6 +111,9 @@ pub fn run(opts: RunOpts) -> i32 {
     };
 
     handoff::write(&opts.origin);
+    if opts.agent_dir.is_some() {
+        config::trim_history();
+    }
     let code = match Session::start(&opts, size) {
         Ok(mut s) => {
             let code = s.run();
@@ -150,6 +154,11 @@ struct Session {
     last_frame: Instant,
     exit: Option<i32>,
     trace: Option<File>,
+    /// `~/dev/proj` form of the folder prompts are logged under; None for -x.
+    history: Option<String>,
+    /// None for -x: a plain command has no prompts to time.
+    turn: Option<Turn>,
+    working: bool,
     started: Instant,
 }
 
@@ -172,10 +181,13 @@ impl Session {
 
         let (awake, awake_rx) = if opts.awake {
             let (tx, rx) = mpsc::channel();
-            let a = Awake::start(Box::new(move |on| {
-                let _ = tx.send(on);
-                term::wake(term::WAKE_THREAD);
-            }));
+            let a = Awake::start(
+                Box::new(move |on| {
+                    let _ = tx.send(on);
+                    term::wake(term::WAKE_THREAD);
+                }),
+                opts.agent_dir.is_some(),
+            );
             (Some(a), Some(rx))
         } else {
             (None, None)
@@ -211,6 +223,9 @@ impl Session {
             last_frame: Instant::now(),
             exit: None,
             trace,
+            history: opts.agent_dir.as_deref().map(pane::tilde),
+            turn: opts.agent_dir.as_ref().map(|_| Turn::default()),
+            working: false,
             started: Instant::now(),
         };
         s.trace("RUN", &format!("{:?} {}x{} child={}x{} outer={:?}", opts.argv, size.rows, size.cols, child_rows, size.cols, s.outer));
@@ -268,6 +283,7 @@ impl Session {
                 self.flush_child();
             }
 
+            self.tick_turn();
             self.maybe_paint();
         }
     }
@@ -282,6 +298,23 @@ impl Session {
             due = due.max(until);
         }
         Some(due.saturating_duration_since(now))
+    }
+
+    /// Bar label and awake follow the turn. The loop comes round at least
+    /// every 200ms, often enough for a seconds counter.
+    fn tick_turn(&mut self) {
+        let Some(turn) = &mut self.turn else { return };
+        let working = turn.working(Instant::now());
+        if working.is_some() != self.working {
+            self.working = working.is_some();
+            if let Some(a) = &self.awake {
+                a.working(self.working);
+            }
+            self.trace("TURN", if self.working { "start" } else { "end" });
+        }
+        if self.keys.set_working(working.map(|d| format!("working {}", turn::elapsed(d)))) {
+            self.dirty = true;
+        }
     }
 
     fn maybe_paint(&mut self) {
@@ -428,6 +461,9 @@ impl Session {
 
         self.dirty = true;
         self.last_output = Instant::now();
+        if let Some(turn) = &mut self.turn {
+            turn.output(self.last_output);
+        }
     }
 
     fn handle_events(&mut self, outer: &mut Vec<u8>) {
@@ -503,6 +539,15 @@ impl Session {
             self.to_child.extend_from_slice(self.keys.pass());
             for cmd in self.keys.take_bangs() {
                 self.run_bang(cmd);
+            }
+            let sent = self.keys.take_sent();
+            if let (Some(folder), Some(turn)) = (&self.history, &mut self.turn) {
+                if !sent.is_empty() {
+                    turn.start(Instant::now());
+                }
+                for prompt in sent {
+                    config::append_history(folder, &prompt);
+                }
             }
             if self.keys.typing() && self.pane.is_some() {
                 self.pane = None;

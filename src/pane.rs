@@ -76,7 +76,7 @@ fn fit(mut rows: Vec<String>, room: isize) -> Vec<String> {
     rows
 }
 
-fn tilde(path: &Path) -> String {
+pub fn tilde(path: &Path) -> String {
     let p = path.to_string_lossy().into_owned();
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() && (p == home || p.starts_with(&format!("{home}/"))) {

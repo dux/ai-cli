@@ -2,8 +2,9 @@
 //!
 //! Herdr's `agent_status` for our own pane is asked over its socket; while it
 //! reads `working` we hold a `caffeinate`, and let go once it has read anything
-//! else RELEASE times in a row. Outside herdr the assertion is held for the
-//! whole session. A thread, so a slow socket never stalls the pump.
+//! else RELEASE times in a row. A thread, so a slow socket never stalls the
+//! pump. Outside herdr an agent run holds it for its turns (see `turn`), and a
+//! -x run, which has none, for the whole session.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -66,18 +67,21 @@ impl Inner {
 pub struct Awake {
     inner: Arc<Inner>,
     quit: Option<Sender<()>>,
+    follows_turns: bool,
 }
 
 impl Awake {
-    pub fn start(on_change: OnChange) -> Awake {
+    pub fn start(on_change: OnChange, turns: bool) -> Awake {
         let inner = Arc::new(Inner {
             hold: Mutex::new(Hold { child: None, stopped: false }),
             on_change: Mutex::new(on_change),
         });
         let pane = std::env::var("HERDR_PANE_ID").unwrap_or_default();
         if pane.is_empty() {
-            inner.hold();
-            return Awake { inner, quit: None };
+            if !turns {
+                inner.hold();
+            }
+            return Awake { inner, quit: None, follows_turns: turns };
         }
 
         let socket = std::env::var("HERDR_SOCKET_PATH")
@@ -106,7 +110,19 @@ impl Awake {
                 }
             }
         });
-        Awake { inner, quit: Some(tx) }
+        Awake { inner, quit: Some(tx), follows_turns: false }
+    }
+
+    /// A turn started or ended. Ignored inside herdr, whose status wins.
+    pub fn working(&self, on: bool) {
+        if !self.follows_turns {
+            return;
+        }
+        if on {
+            self.inner.hold();
+        } else {
+            self.inner.release();
+        }
     }
 
     pub fn stop(self) {

@@ -1,6 +1,7 @@
 mod awake;
 mod bang;
 mod cli;
+mod config;
 mod handoff;
 mod keys;
 mod launch;
@@ -11,6 +12,7 @@ mod scan;
 mod session;
 mod term;
 mod text;
+mod turn;
 mod update;
 
 use std::path::Path;
@@ -29,6 +31,7 @@ fn main() {
         }
         Ok(Command::Help) => print!("{}", cli::help()),
         Ok(Command::Update { tools }) => exit(update::run(&tools)),
+        Ok(Command::History { words }) => exit(config::print_history(&words)),
         Ok(Command::Run(opts)) => {
             // Answer to the agent's name, so a pane watcher reading argv[0]
             // sees `omp` and not `ai`. Only worth it when we stay around to

@@ -78,6 +78,8 @@ pub struct KeyBuffer {
     paste: bool,
     bang: bool,
     bangs: Vec<String>,
+    /// Prompts submitted in the last feed, repeats included, for the history file.
+    sent: Vec<String>,
     pass: Vec<u8>,
     hold: Vec<u8>,
     /// The keystroke that ended a ! line is ours, not the child's.
@@ -85,6 +87,8 @@ pub struct KeyBuffer {
     /// The sequence in `hold` is a mouse report aimed at the bar.
     drop: bool,
     awake: bool,
+    /// `working 1m12s` while a turn runs.
+    working: Option<String>,
     child_rows: u16,
     /// F10 was pressed: the wrapper is to quit.
     exit: bool,
@@ -109,11 +113,13 @@ impl KeyBuffer {
             paste: false,
             bang: false,
             bangs: Vec::new(),
+            sent: Vec::new(),
             pass: Vec::new(),
             hold: Vec::new(),
             swallow: false,
             drop: false,
             awake: false,
+            working: None,
             child_rows: u16::MAX,
             exit: false,
         }
@@ -128,6 +134,11 @@ impl KeyBuffer {
     /// ! lines submitted in the last feed, in order. "" is a bare !.
     pub fn take_bangs(&mut self) -> Vec<String> {
         std::mem::take(&mut self.bangs)
+    }
+
+    /// Prompts submitted in the last feed, in order.
+    pub fn take_sent(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.sent)
     }
 
     /// True once after F10 was pressed. The key itself never reaches the child.
@@ -154,6 +165,13 @@ impl KeyBuffer {
         self.awake = on;
     }
 
+    /// Returns true when the label changed.
+    pub fn set_working(&mut self, label: Option<String>) -> bool {
+        let changed = self.working != label;
+        self.working = label;
+        changed
+    }
+
     /// Rows the child owns; mouse reports below them point at the bar.
     pub fn set_child_rows(&mut self, rows: u16) {
         self.child_rows = rows;
@@ -163,6 +181,7 @@ impl KeyBuffer {
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         self.pass.clear();
         self.bangs.clear();
+        self.sent.clear();
         let mut changed = false;
 
         for &b in bytes {
@@ -208,7 +227,13 @@ impl KeyBuffer {
         {
             *last = self.typing_row(cols);
         }
-        let label = if self.awake { format!("{LABEL} · awake") } else { LABEL.to_string() };
+        let mut label = LABEL.to_string();
+        if self.awake {
+            label.push_str(" · awake");
+        }
+        if let Some(w) = &self.working {
+            label.push_str(&format!(" · {w}"));
+        }
         let mut out = vec![rule(cols, &label)];
         out.extend(rows);
         out
@@ -530,7 +555,11 @@ impl KeyBuffer {
             self.bangs.push(command(&raw));
             return true;
         }
-        if text.is_empty() || self.prompts.first() == Some(&text) {
+        if text.is_empty() {
+            return false;
+        }
+        self.sent.push(text.clone());
+        if self.prompts.first() == Some(&text) {
             return false;
         }
         self.prompts.insert(0, text);
@@ -659,6 +688,19 @@ mod tests {
     fn repeat_of_the_last_prompt_is_not_pinned_twice() {
         let kb = f!(buffer(), "same\r", "same\r");
         assert_eq!([older(&kb), newest(&kb)], ["", "❯ same"]);
+    }
+
+    #[test]
+    fn every_prompt_is_sent_to_history_but_not_bangs_or_blanks() {
+        let mut kb = buffer();
+        let mut sent = Vec::new();
+        for chunk in ["same\r", "same\r", "\r", "!ls\r"] {
+            kb.feed(chunk.as_bytes());
+            sent.extend(kb.take_sent());
+        }
+        assert_eq!(sent, ["same", "same"]);
+        kb.feed(b"\x1b[200~a\nb\x1b[201~\r");
+        assert_eq!(kb.take_sent(), ["a\\ b"]);
     }
 
     #[test]

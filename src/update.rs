@@ -1,6 +1,6 @@
 //! `ai --update`: runs each agent CLI's own updater, reports old -> new, then
 //! re-reads the model lists and shows what appeared or disappeared since the
-//! last run (cache shared with the Ruby `llm wrap:run --update`).
+//! last run.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use regex::Regex;
 
-use crate::launch;
+use crate::{config, launch};
 
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
@@ -159,8 +159,7 @@ pub fn diff(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
 }
 
 fn cache_path() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join(".cache/llm/models.json")
+    config::dir().join("models.json")
 }
 
 fn cache_read() -> BTreeMap<String, Vec<String>> {

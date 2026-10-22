@@ -9,8 +9,8 @@
 //!     stays put until a program asks for another.
 //!   * `CSI 3 J` - the program clearing its scrollback. Ours lives in the real
 //!     terminal, so it is cleared there.
-//!   * OSC notifications and cwd (7, 9, 99, 777) - the emulator drops them, a
-//!     pane watcher wants them.
+//!   * OSC notifications and cwd (7, 9, 99, 777) and 1337 SetUserVar - the
+//!     emulator drops them, a pane watcher or the terminal's tab wants them.
 //!   * synchronized output (mode 2026), so a frame is never painted half done.
 //!
 //! Nothing that moves the cursor or touches a cell is ever forwarded: that is
@@ -197,7 +197,9 @@ impl Perform for State {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let Some(&num) = params.first() else { return };
-        if !FORWARD_OSC.contains(&num) {
+        // Of 1337 only SetUserVar: a hook flagging the tab (WezTerm reads it).
+        let user_var = num == b"1337" && params.get(1).is_some_and(|p| p.starts_with(b"SetUserVar="));
+        if !FORWARD_OSC.contains(&num) && !user_var {
             return;
         }
         self.outer.extend_from_slice(b"\x1b]");
@@ -256,6 +258,12 @@ mod tests {
         let mut s = scan(false, b"\x1b[3J\x1b]9;done\x07\x1b]0;title\x07\x1b]777;notify;a;b\x1b\\");
         assert!(s.take_history_reset());
         assert_eq!(s.take_outer(), b"\x1b[3J\x1b]9;done\x07\x1b]777;notify;a;b\x1b\\");
+    }
+
+    #[test]
+    fn user_vars_pass_but_other_1337_does_not() {
+        let mut s = scan(false, b"\x1b]1337;SetUserVar=claude_status=ZG9uZQ==\x1b\\\x1b]1337;File=inline=1:AAAA\x07");
+        assert_eq!(s.take_outer(), b"\x1b]1337;SetUserVar=claude_status=ZG9uZQ==\x1b\\");
     }
 
     #[test]

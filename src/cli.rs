@@ -1,7 +1,8 @@
-//! Command line: `ai [TOOL] [-c] [-f] [-b] [-a] [-u] [-l N] [-x] [-h] [-- extra...]`.
+//! Command line: `ai [TOOL] [-c] [-f] [-b] [-a] [-u] [-l N] [-x] [-H] [-h] [-- extra...]`.
 
 use std::path::{Path, PathBuf};
 
+use crate::config::{self, Defaults};
 use crate::launch;
 
 pub const DEFAULT_KEEP: usize = 3;
@@ -11,6 +12,7 @@ const MAX_KEEP: usize = 20;
 pub enum Command {
     Help,
     Update { tools: Vec<String> },
+    History { words: Vec<String> },
     Run(RunOpts),
 }
 
@@ -22,6 +24,9 @@ pub struct RunOpts {
     pub origin: Vec<String>,
     pub keep: usize,
     pub awake: bool,
+    /// Set for agents: the folder they started in, logged with each prompt.
+    /// None for -x, which keeps no history and has no turns.
+    pub agent_dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -33,10 +38,11 @@ struct Flags {
     update: bool,
     exec: bool,
     help: bool,
+    history: bool,
     keep: Option<usize>,
 }
 
-fn parse_keep(v: &str) -> Result<usize, String> {
+pub fn parse_keep(v: &str) -> Result<usize, String> {
     v.parse::<usize>()
         .map(|n| n.clamp(1, MAX_KEEP))
         .map_err(|_| format!("--lines takes a number, got {v:?}"))
@@ -45,10 +51,17 @@ fn parse_keep(v: &str) -> Result<usize, String> {
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    parse_in(args, &cwd, &home)
+    parse_in(args, &cwd, &home, config::defaults)
 }
 
-pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, String> {
+/// `defaults` is read only for a run: a broken config file must not stand in
+/// the way of -h, -H or -u.
+pub fn parse_in(
+    args: &[String],
+    cwd: &Path,
+    home: &Path,
+    defaults: impl FnOnce() -> Result<Defaults, String>,
+) -> Result<Command, String> {
     let mut f = Flags::default();
     let mut positional: Vec<String> = Vec::new();
     let mut passthrough: Vec<String> = Vec::new();
@@ -67,6 +80,7 @@ pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, Str
                 "update" => f.update = true,
                 "exec" => f.exec = true,
                 "help" => f.help = true,
+                "history" => f.history = true,
                 "lines" => {
                     let v = it.next().ok_or("--lines needs a value")?;
                     f.keep = Some(parse_keep(v)?);
@@ -87,6 +101,7 @@ pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, Str
                     'u' => f.update = true,
                     'x' => f.exec = true,
                     'h' => f.help = true,
+                    'H' => f.history = true,
                     'l' => {
                         let rest = &body[i + 1..];
                         let v = if rest.is_empty() {
@@ -108,7 +123,22 @@ pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, Str
     if f.help {
         return Ok(Command::Help);
     }
-    let keep = f.keep.unwrap_or(DEFAULT_KEEP);
+    if f.history {
+        if f.cont || f.full || f.bare || f.awake || f.update || f.exec || f.keep.is_some() {
+            return Err("-H takes search words only".into());
+        }
+        return Ok(Command::History { words: positional.into_iter().chain(passthrough).collect() });
+    }
+    let prefix = positional.first().cloned();
+    let unknown = || format!("unknown tool {:?} - one of {}", prefix.clone().unwrap_or_default(), launch::names().join(", "));
+    if f.update && !f.exec {
+        let tool = launch::tool(prefix.as_deref()).ok_or_else(unknown)?;
+        let tools = if prefix.is_some() { vec![tool.to_string()] } else { launch::names() };
+        return Ok(Command::Update { tools });
+    }
+
+    let d = defaults()?;
+    let keep = f.keep.or(d.lines).unwrap_or(DEFAULT_KEEP);
     let lines_origin = |flag: &str| -> Vec<String> {
         if keep == DEFAULT_KEEP { vec![] } else { vec![flag.to_string(), keep.to_string()] }
     };
@@ -131,18 +161,15 @@ pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, Str
         origin.extend(lines_origin("-l"));
         origin.push("--".into());
         origin.extend(argv.iter().cloned());
-        return Ok(Command::Run(RunOpts { argv, env: vec![], agent_files: vec![], origin, keep, awake: f.awake }));
+        let opts = RunOpts { argv, env: vec![], agent_files: vec![], origin, keep, awake: f.awake, agent_dir: None };
+        return Ok(Command::Run(opts));
     }
 
-    let prefix = positional.first().cloned();
-    let tool = launch::tool(prefix.as_deref()).ok_or_else(|| {
-        format!("unknown tool {:?} - one of {}", prefix.clone().unwrap_or_default(), launch::names().join(", "))
-    })?;
-    if f.update {
-        let tools = if prefix.is_some() { vec![tool.to_string()] } else { launch::names() };
-        return Ok(Command::Update { tools });
-    }
+    let tool = launch::tool(prefix.as_deref().or(d.tool)).ok_or_else(unknown)?;
 
+    f.full |= d.full;
+    f.bare |= d.bare;
+    f.awake |= d.awake;
     let extra: Vec<String> = positional.into_iter().skip(usize::from(prefix.is_some())).chain(passthrough).collect();
     let sw = launch::Switches { cont: f.cont, full: f.full, bare: f.bare };
     let l = launch::build(tool, &extra, &sw, cwd, home);
@@ -156,19 +183,21 @@ pub fn parse_in(args: &[String], cwd: &Path, home: &Path) -> Result<Command, Str
     origin.extend(lines_origin("--lines"));
     origin.push("--".into());
     origin.extend(extra);
-    Ok(Command::Run(RunOpts { argv: l.argv, env: l.env, agent_files: l.files, origin, keep, awake: f.awake }))
+    let agent_dir = Some(cwd.to_path_buf());
+    Ok(Command::Run(RunOpts { argv: l.argv, env: l.env, agent_files: l.files, origin, keep, awake: f.awake, agent_dir }))
 }
 
 pub fn help() -> String {
     "\
 Usage: ai [TOOL] [-c] [-f] [-b] [-a] [-l N] [-u] [-- args...]
        ai -x [-a] [-l N] -- COMMAND [args...]
+       ai -H [WORDS...]
 
 Start an agent CLI inside the ai wrapper, with the same switches whichever one it is.
 
 TOOL is a prefix of claude, codex, grok, opencode or omp - first match wins, so `c` is
-claude, `co` codex, `o` opencode and `om` omp. No tool means claude. The switches map
-to what each CLI actually takes:
+claude, `co` codex, `o` opencode and `om` omp. No tool means claude (or `tool` from
+the config file below). The switches map to what each CLI actually takes:
 
   -c, --continue  continue the last session here  claude/grok/opencode/omp -c, codex resume --last
   -f, --full      full permissions, no prompts    --dangerously-skip-permissions, --dangerously-bypass-
@@ -179,6 +208,7 @@ to what each CLI actually takes:
   -l, --lines N   prompt rows kept in the bar (1-20, default 3)
   -x, --exec      wrap an arbitrary command instead of an agent (no -c/-f/-b, no AGENTS.md)
   -u, --update    update the agent CLIs, then show model changes
+  -H, --history   print past prompts holding every WORD (any case), newest last
   -h, --help      this text
 
 Short switches combine: -cf, -cfb, -l5.
@@ -202,7 +232,18 @@ keystrokes (history recall and autocomplete are not seen). A line starting with 
 never reaches the agent: it runs in $SHELL inside the wrapper and the bar grows to
 show its output until you type again (!! sends a literal !, a bare ! closes it).
 F10 quits the wrapper and the agent with it (SIGHUP, so it can save its session).
+While the agent works on a prompt the bar shows `working 1m12s`; the turn ends once
+it has printed nothing for 3s. -a holds off sleep for exactly that (inside Herdr it
+follows Herdr's own agent status instead).
 AI_WRAP_DEBUG=<file> logs keys and events.
+
+Files live in ~/.config/ai-cli (or $XDG_CONFIG_HOME/ai-cli):
+  config       defaults for agent runs, `key = value` lines, # comments; the command
+               line adds to them: tool = codex, full = true, bare = true,
+               awake = true, lines = 5 (only lines applies to -x)
+  history.txt  every prompt sent to an agent: `time : folder : prompt`, cut back to
+               its newest half once past 1 MiB
+  models.json  model lists from the last --update
 
 Examples:
   ai
@@ -212,6 +253,7 @@ Examples:
   ai -l 5 -a
   ai -x -- htop
   ai --update
+  ai -H resize bar
 "
     .to_string()
 }
@@ -226,7 +268,7 @@ mod tests {
 
     fn p(v: &[&str]) -> Result<Command, String> {
         let d = Path::new("/nonexistent-home");
-        parse_in(&s(v), d, d)
+        parse_in(&s(v), d, d, || Ok(Defaults::default()))
     }
 
     fn run(v: &[&str]) -> RunOpts {
@@ -310,11 +352,43 @@ mod tests {
         let r = run(&["-xal", "6", "vim", "--", "-c"]);
         assert_eq!(r.argv, s(&["vim", "-c"]));
         assert_eq!(r.origin, s(&["ai", "-x", "-a", "-l", "6", "--", "vim", "-c"]));
-        assert!(r.agent_files.is_empty() && r.env.is_empty());
+        assert!(r.agent_files.is_empty() && r.env.is_empty() && r.agent_dir.is_none());
         assert!(p(&["-x"]).is_err());
         assert!(p(&["-x", "--"]).is_err());
         assert!(p(&["-xc", "--", "ls"]).is_err());
         assert!(p(&["-x", "-f", "ls"]).is_err());
         assert!(p(&["-x", "--bare", "ls"]).is_err());
+    }
+
+    #[test]
+    fn history_takes_words_only() {
+        assert_eq!(p(&["-H", "fix", "bar"]).unwrap(), Command::History { words: s(&["fix", "bar"]) });
+        assert_eq!(p(&["--history", "--", "-x"]).unwrap(), Command::History { words: s(&["-x"]) });
+        assert_eq!(p(&["-H"]).unwrap(), Command::History { words: vec![] });
+        assert!(p(&["-Hc"]).is_err());
+        assert!(p(&["-H", "-l", "4"]).is_err());
+    }
+
+    #[test]
+    fn config_defaults_sit_under_the_command_line() {
+        let home = Path::new("/nonexistent-home");
+        let d = || Ok(Defaults { tool: Some("codex"), full: true, bare: false, awake: true, lines: Some(6) });
+        let run_d = |v: &[&str]| match parse_in(&s(v), home, home, d).unwrap() {
+            Command::Run(r) => r,
+            other => panic!("{other:?}"),
+        };
+        let r = run_d(&[]);
+        assert_eq!(r.argv[..2], s(&["codex", "--dangerously-bypass-approvals-and-sandbox"]));
+        assert_eq!((r.keep, r.awake), (6, true));
+        let r = run_d(&["c", "-l2"]);
+        assert_eq!(r.argv[0], "claude");
+        assert_eq!(r.keep, 2);
+        let r = run_d(&["-x", "--", "htop"]);
+        assert_eq!(r.argv, s(&["htop"]));
+        assert_eq!((r.keep, r.awake), (6, false), "-x takes only lines from the config");
+        let broken = || Err("config:1: unknown key \"x\"".to_string());
+        assert_eq!(parse_in(&s(&[]), home, home, broken).unwrap_err(), "config:1: unknown key \"x\"");
+        assert_eq!(parse_in(&s(&["-H"]), home, home, broken).unwrap(), Command::History { words: vec![] });
+        assert_eq!(parse_in(&s(&["-u"]), home, home, broken).unwrap(), Command::Update { tools: launch::names() });
     }
 }

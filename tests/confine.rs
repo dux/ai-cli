@@ -58,6 +58,7 @@ impl Screen {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ai"));
         cmd.args(args)
             .env("HOME", std::env::temp_dir())
+            .env_remove("XDG_CONFIG_HOME")
             .env_remove("HERDR_PANE_ID")
             .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
             .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
