@@ -1,0 +1,13 @@
+[package]
+name = "ai"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow = "1.0.104"
+libc = "0.2.191"
+nix = { version = "0.31", features = ["term", "fs", "process", "signal", "ioctl", "poll"] }
+regex = "1.13.1"
+serde_json = "1.0.154"
+unicode-width = "0.2"
