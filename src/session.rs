@@ -99,13 +99,12 @@ const FORWARD_MODES: &[(TermMode, &str, &str)] = &[
 ];
 
 pub fn run(opts: RunOpts) -> i32 {
-    let bare = if opts.awake { Awake::wrap(&opts.argv) } else { opts.argv.clone() };
     let stdin = io::stdin().as_raw_fd();
     let stdout = io::stdout().as_raw_fd();
     let size = if term::is_tty(stdin) && term::is_tty(stdout) { term::size_of(stdout) } else { None };
     let Some(size) = size.filter(|s| s.rows as usize >= opts.keep + 1 + MIN_CHILD) else {
         // No terminal to draw on, or too small for a bar: get out of the way.
-        let err = term::exec(&bare, &opts.env);
+        let err = term::exec(&opts.argv, &opts.env);
         eprintln!("ai: {}: {err}", opts.argv[0]);
         return 127;
     };

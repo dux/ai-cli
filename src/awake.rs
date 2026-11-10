@@ -132,13 +132,6 @@ impl Awake {
         }
         self.inner.release();
     }
-
-    /// The argv to exec instead, when there is no session to watch from.
-    pub fn wrap(argv: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = ["caffeinate", "-i", "-s"].iter().map(|s| s.to_string()).collect();
-        out.extend(argv.iter().cloned());
-        out
-    }
 }
 
 /// One NDJSON request, one line back. Anything going wrong reads as "not
@@ -163,12 +156,6 @@ fn status(socket: &str, pane: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
-
-    #[test]
-    fn wrap_prefixes_caffeinate() {
-        let argv = vec!["claude".to_string(), "--x".to_string()];
-        assert_eq!(Awake::wrap(&argv), ["caffeinate", "-i", "-s", "claude", "--x"]);
-    }
 
     #[test]
     fn status_reads_agent_status_from_the_socket() {

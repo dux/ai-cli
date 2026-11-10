@@ -113,6 +113,7 @@ Everything lives in `~/.config/ai-cli/` (or `$XDG_CONFIG_HOME/ai-cli/`):
 
 ```
 # defaults for agent runs; command line switches add to these
+* Without a terminal, or in one too short for the bar, `ai` runs the agent bare and `-a` does nothing: nothing is left to watch whether it works.
 tool = codex
 full = true
 bare = false
