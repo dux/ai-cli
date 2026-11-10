@@ -5,6 +5,7 @@ mod config;
 mod handoff;
 mod keys;
 mod launch;
+mod model;
 mod pane;
 mod probe;
 mod render;

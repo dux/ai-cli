@@ -1,9 +1,9 @@
-//! Command line: `ai [TOOL] [-c] [-f] [-b] [-a] [-u] [-l N] [-x] [-H] [-h] [-- extra...]`.
+//! Command line: `ai [TOOL] [MODEL] [-c] [-f] [-b] [-a] [-u] [-l N] [-x] [-H] [-h] [-- extra...]`.
 
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Defaults};
-use crate::launch;
+use crate::{launch, model};
 
 pub const DEFAULT_KEEP: usize = 3;
 const MAX_KEEP: usize = 20;
@@ -165,16 +165,25 @@ pub fn parse_in(
         return Ok(Command::Run(opts));
     }
 
-    let tool = launch::tool(prefix.as_deref().or(d.tool)).ok_or_else(unknown)?;
+    // No tool name holds a digit, so a first word with one is the MODEL.
+    let named = prefix.as_deref().filter(|p| !p.contains(|c: char| c.is_ascii_digit()));
+    let tool = launch::tool(named.or(d.tool)).ok_or_else(unknown)?;
 
     f.full |= d.full;
     f.bare |= d.bare;
     f.awake |= d.awake;
-    let extra: Vec<String> = positional.into_iter().skip(usize::from(prefix.is_some())).chain(passthrough).collect();
-    let sw = launch::Switches { cont: f.cont, full: f.full, bare: f.bare };
+    let mut rest = positional.into_iter().skip(usize::from(named.is_some()));
+    let model = match rest.next().filter(|m| !m.is_empty()) {
+        Some(_) if launch::spec(tool).model.is_none() => return Err(format!("{tool} takes no model when it starts")),
+        Some(fragment) => Some(model::resolve(tool, &fragment, home)),
+        None => None,
+    };
+    let extra: Vec<String> = rest.chain(passthrough).collect();
+    let sw = launch::Switches { cont: f.cont, full: f.full, bare: f.bare, model };
     let l = launch::build(tool, &extra, &sw, cwd, home);
 
     let mut origin = vec!["ai".to_string(), tool.to_string()];
+    origin.extend(sw.model.clone());
     for (on, name) in [(f.cont, "--continue"), (f.full, "--full"), (f.bare, "--bare"), (f.awake, "--awake")] {
         if on {
             origin.push(name.into());
@@ -189,15 +198,26 @@ pub fn parse_in(
 
 pub fn help() -> String {
     "\
-Usage: ai [TOOL] [-c] [-f] [-b] [-a] [-l N] [-u] [-- args...]
+Usage: ai [TOOL] [MODEL] [-c] [-f] [-b] [-a] [-l N] [-u] [-- args...]
        ai -x [-a] [-l N] -- COMMAND [args...]
        ai -H [WORDS...]
 
 Start an agent CLI inside the ai wrapper, with the same switches whichever one it is.
 
 TOOL is a prefix of claude, codex, grok, opencode or omp - first match wins, so `c` is
-claude, `co` codex, `o` opencode and `om` omp. No tool means claude (or `tool` from
-the config file below). The switches map to what each CLI actually takes:
+claude, `co` codex, `o` opencode and `om` omp. No tool means the one you ran last, kept
+as `tool` in the config file below (claude before any run).
+
+MODEL is a piece of a model name, completed to the model you last used in that tool
+whose name holds it: `ai om 5-2` starts omp with anthropic/claude-fable-5-2. It is
+read from the tool's own session records (claude: its newest 100 sessions); with no
+match the piece is handed over as typed, so a model you never ran works by its full
+name. Case does not count, and `.` and `-` are the same: `5.5` finds claude-opus-5-5.
+opencode takes no model when it starts.
+No tool name holds a digit, so a first word with one is the MODEL for the tool you
+ran last: `ai 5.5`.
+
+The switches map to what each CLI actually takes:
 
   -c, --continue  continue the last session here  claude/grok/opencode/omp -c, codex resume --last
   -f, --full      full permissions, no prompts    --dangerously-skip-permissions, --dangerously-bypass-
@@ -232,6 +252,7 @@ keystrokes (history recall and autocomplete are not seen). A line starting with 
 never reaches the agent: it runs in $SHELL inside the wrapper and the bar grows to
 show its output until you type again (!! sends a literal !, a bare ! closes it).
 F10 quits the wrapper and the agent with it (SIGHUP, so it can save its session).
+SIGURG (Herdr's ⌥⌘K) clears screen and scrollback, the bar stays; the agent is not told.
 While the agent works on a prompt the bar shows `working 1m12s`; the turn ends once
 it has printed nothing for 3s. -a holds off sleep for exactly that (inside Herdr it
 follows Herdr's own agent status instead).
@@ -240,7 +261,8 @@ AI_WRAP_DEBUG=<file> logs keys and events.
 Files live in ~/.config/ai-cli (or $XDG_CONFIG_HOME/ai-cli):
   config       defaults for agent runs, `key = value` lines, # comments; the command
                line adds to them: tool = codex, full = true, bare = true,
-               awake = true, lines = 5 (only lines applies to -x)
+               awake = true, lines = 5 (only lines applies to -x). Every agent
+               start sets tool to that agent
   history.txt  every prompt sent to an agent: `time : folder : prompt`, cut back to
                its newest half once past 1 MiB
   models.json  model lists from the last --update
@@ -249,10 +271,11 @@ Examples:
   ai
   ai g -cf
   ai cod -cb
-  ai c -- --model opus
+  ai om 5-2
+  ai 5.5
+  ai c -- --resume
   ai -l 5 -a
   ai -x -- htop
-SIGURG (Herdr's ⌥⌘K) clears screen and scrollback, the bar stays; the agent is not told.
   ai --update
   ai -H resize bar
 "
@@ -324,8 +347,10 @@ mod tests {
         let r = run(&["c", "-b", "--", "--model", "opus", "-c"]);
         assert_eq!(r.argv, s(&["claude", "--model", "opus", "-c"]));
         assert_eq!(r.origin, s(&["ai", "claude", "--bare", "--", "--model", "opus", "-c"]));
-        let r = run(&["c", "foo", "-b", "--", "bar"]);
-        assert_eq!(r.argv, s(&["claude", "foo", "bar"]));
+        let r = run(&["c", "foo", "bar", "-b", "--", "baz"]);
+        assert_eq!(r.argv, s(&["claude", "--model", "foo", "bar", "baz"]));
+        assert_eq!(r.origin, s(&["ai", "claude", "foo", "--bare", "--", "bar", "baz"]));
+        assert_eq!(p(&["o", "foo"]).unwrap_err(), "opencode takes no model when it starts");
     }
 
     #[test]
@@ -334,6 +359,18 @@ mod tests {
         assert!(p(&["-z"]).is_err());
         assert!(p(&["--nope"]).is_err());
         assert!(p(&["-cz"]).is_err());
+    }
+
+    #[test]
+    fn a_first_word_with_a_digit_is_the_model_for_the_default_tool() {
+        let r = run(&["5.5", "hi"]);
+        assert_eq!(r.argv, s(&["claude", "--model", "5.5", "hi"]));
+        assert_eq!(r.origin, s(&["ai", "claude", "5.5", "--", "hi"]));
+        let home = Path::new("/nonexistent-home");
+        let last = || Ok(Defaults { tool: Some("omp"), ..Defaults::default() });
+        let Command::Run(r) = parse_in(&s(&["5-2", "-c"]), home, home, last).unwrap() else { panic!() };
+        assert_eq!(r.argv, s(&["omp", "-c", "--model", "5-2"]));
+        assert_eq!(p(&["opus"]).unwrap_err(), "unknown tool \"opus\" - one of claude, codex, grok, opencode, omp");
     }
 
     #[test]

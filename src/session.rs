@@ -112,6 +112,7 @@ pub fn run(opts: RunOpts) -> i32 {
     handoff::write(&opts.origin);
     if opts.agent_dir.is_some() {
         config::trim_history();
+        config::remember_tool(&opts.argv[0]);
     }
     let code = match Session::start(&opts, size) {
         Ok(mut s) => {

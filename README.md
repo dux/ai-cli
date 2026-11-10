@@ -12,14 +12,16 @@ cargo install --path .
 ## Usage
 
 ```
-ai [TOOL] [-c] [-f] [-b] [-a] [-l N] [-u] [-- args...]
+ai [TOOL] [MODEL] [-c] [-f] [-b] [-a] [-l N] [-u] [-- args...]
 ai -x [-a] [-l N] -- COMMAND [args...]
 ai -H [WORDS...]
 ```
 
 `TOOL` is a prefix of `claude`, `codex`, `grok`, `opencode` or `omp`; the first match wins.
 So `c` is claude, `co` codex, `o` opencode and `om` omp.
-No tool means claude, or `tool` from the [config file](#config).
+No tool means the one you ran last, kept as `tool` in the [config file](#config); claude before any run.
+`MODEL` is a piece of a model name, completed to the [model you last used](#model) that holds it.
+No tool name holds a digit, so a first word with one is the `MODEL` for the tool you ran last: `ai 5.5`.
 
 | Switch | Meaning |
 | --- | --- |
@@ -40,7 +42,9 @@ Anything after `--` is passed to the tool untouched.
 ai
 ai g -cf
 ai cod -cb
-ai c -- --model opus
+ai om 5-2
+ai 5.5
+ai c -- --resume
 ai -l 5 -a
 ai -x -- htop
 ai --update
@@ -51,6 +55,26 @@ ai -H resize bar
 
 Each generic switch becomes whatever the chosen CLI takes, e.g. `-c` is `claude -c` but `codex resume --last`, and `-f` is `--dangerously-skip-permissions` for claude.
 See `./src/launch.rs` for the full table.
+
+## Model
+
+`ai om 5-2` starts omp with the model last used in omp whose name contains `5-2`, e.g. `anthropic/claude-fable-5-2`.
+Case is ignored, and `.` and `-` count as the same character, so `5.5` finds `claude-opus-5-5`.
+A full model name always means that model.
+With no match the piece is handed to the tool as typed, so a model you never ran works by its full name.
+
+The model goes to the tool as `--model`, and "last used" is read from the tool's own records:
+
+| Tool | Record |
+| --- | --- |
+| claude | `~/.claude/projects/*/*.jsonl`, the newest 100 sessions |
+| codex | `~/.codex/state_<n>.sqlite`, table `threads` |
+| grok | `~/.grok/sessions/*/*/summary.json` |
+| omp | `~/.omp/agent/agent.db`, table `model_usage` |
+
+The two databases are read with the `sqlite3` command.
+These are private formats: if one changes, the lookup finds nothing and the piece is passed on as typed.
+opencode has no way to take a model when it starts, so `ai o MODEL` is an error.
 
 ## AGENTS.md injection
 
@@ -75,6 +99,7 @@ The bar is only redrawn when its own content changes.
 * A line starting with `!` never reaches the agent: it runs in `$SHELL` and the bar grows to show its output until you type again.
   `!!` sends a literal `!`, a bare `!` closes the output.
 * F10 quits the wrapper and the agent (SIGHUP, so it can save its session).
+* SIGURG clears the screen and scrollback like iTerm's ⌘K, without telling the agent; the bar stays. Herdr's ⌥⌘K sends it through `~/.config/herdr/clear-pane`, since an outer clear alone would leave the wrapper painting only rows it thinks changed.
 * While the agent works on a prompt the bar's rule shows `working 1m12s`.
   A turn starts when you send a prompt and ends once the agent has printed nothing for 3s; agents redraw a spinner or timer the whole time they work.
 * Keyboard protocol changes, cursor shape, scrollback clears, OSC notifications, OSC 1337 `SetUserVar` and synchronized output are forwarded to the real terminal.
@@ -88,6 +113,7 @@ The bar is only redrawn when its own content changes.
 * Inside Herdr: while Herdr reports the pane as `working` (via `HERDR_PANE_ID` and `HERDR_SOCKET_PATH`, default `~/.config/herdr/herdr.sock`).
 * Outside Herdr: for each turn, as shown in the bar.
 * `-x` runs have no turns, so they hold it for the whole session.
+* Without a terminal, or in one too short for the bar, `ai` runs the agent bare and `-a` does nothing: nothing is left to watch whether it works.
 
 ## Herdr integration
 
@@ -99,7 +125,6 @@ The original command line is written to `$XDG_STATE_HOME/llm-wrap/<pid>` (defaul
 It then re-reads the model lists and shows what appeared or disappeared since the last run.
 The model cache is `~/.config/ai-cli/models.json`.
 A TOOL prefix limits the update to that one tool.
-* SIGURG clears the screen and scrollback like iTerm's ⌘K, without telling the agent; the bar stays. Herdr's ⌥⌘K sends it through `~/.config/herdr/clear-pane`, since an outer clear alone would leave the wrapper painting only rows it thinks changed.
 
 ## Files
 
@@ -113,7 +138,6 @@ Everything lives in `~/.config/ai-cli/` (or `$XDG_CONFIG_HOME/ai-cli/`):
 
 ```
 # defaults for agent runs; command line switches add to these
-* Without a terminal, or in one too short for the bar, `ai` runs the agent bare and `-a` does nothing: nothing is left to watch whether it works.
 tool = codex
 full = true
 bare = false
@@ -122,6 +146,7 @@ lines = 5
 ```
 
 `tool` takes a prefix like the command line; a TOOL given on the command line wins, and so does `-l`.
+Every agent start sets `tool` to that agent, leaving the other lines as they are.
 The switches can only be turned on, so a `true` here applies to every run.
 Only `lines` applies to `-x` runs.
 A bad line stops `ai` with its line number, e.g. `ai: ~/.config/ai-cli/config:3: unknown key "x"`.

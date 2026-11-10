@@ -46,10 +46,52 @@ pub fn defaults() -> Result<Defaults, String> {
     }
 }
 
+/// Keeps `tool` in the config file at the agent just started, so the next run
+/// without a TOOL gets it. Every other line stays as written.
+pub fn remember_tool(tool: &str) {
+    let path = dir().join("config");
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(_) => return,
+    };
+    let new = with_tool(&old, tool);
+    if new == old || std::fs::create_dir_all(dir()).is_err() {
+        return;
+    }
+    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
+    if std::fs::write(&tmp, new).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn with_tool(text: &str, tool: &str) -> String {
+    let set = format!("tool = {tool}");
+    let mut found = false;
+    let mut lines: Vec<&str> = text
+        .lines()
+        .map(|line| match uncommented(line).split_once('=') {
+            Some((key, value)) if key.trim() == "tool" => {
+                found = true;
+                if value.trim() == tool { line } else { set.as_str() }
+            }
+            _ => line,
+        })
+        .collect();
+    if !found {
+        lines.push(&set);
+    }
+    lines.join("\n") + "\n"
+}
+
+fn uncommented(line: &str) -> &str {
+    line.split('#').next().unwrap_or_default().trim()
+}
+
 fn parse_defaults(text: &str) -> Result<Defaults, String> {
     let mut d = Defaults::default();
     for (i, line) in text.lines().enumerate() {
-        let line = line.split('#').next().unwrap_or_default().trim();
+        let line = uncommented(line);
         if line.is_empty() {
             continue;
         }
@@ -162,6 +204,16 @@ mod tests {
     fn defaults_parse_with_comments_and_prefixes() {
         let d = parse_defaults("# mine\n\ntool = cod\nfull = true # always\nawake=false\nlines = 50\n").unwrap();
         assert_eq!(d, Defaults { tool: Some("codex"), full: true, bare: false, awake: false, lines: Some(20) });
+    }
+
+    #[test]
+    fn remembered_tool_replaces_its_line_and_leaves_the_rest() {
+        assert_eq!(with_tool("", "omp"), "tool = omp\n");
+        assert_eq!(with_tool("# mine\nfull = true # always\n", "omp"), "# mine\nfull = true # always\ntool = omp\n");
+        assert_eq!(with_tool("tool = cod # old\nlines = 5\n", "omp"), "tool = omp\nlines = 5\n");
+        let same = "lines = 5\ntool = omp # mine\n";
+        assert_eq!(with_tool(same, "omp"), same, "already there: not rewritten");
+        assert_eq!(parse_defaults(&with_tool("# tool = grok\n", "omp")).unwrap().tool, Some("omp"));
     }
 
     #[test]

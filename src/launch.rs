@@ -22,6 +22,8 @@ pub struct Tool {
     pub version: &'static [&'static str],
     /// None where the CLI has no listing command - skip, not "none".
     pub models: Option<&'static [&'static str]>,
+    /// Flag taking the model to start with; None where the TUI has none.
+    pub model: Option<&'static str>,
     pub agents: Agents,
 }
 
@@ -33,6 +35,7 @@ pub const TOOLS: &[Tool] = &[
         update: &["claude", "update"],
         version: &["claude", "--version"],
         models: None,
+        model: Some("--model"),
         agents: Agents::Flag("--append-system-prompt"),
     },
     Tool {
@@ -42,6 +45,7 @@ pub const TOOLS: &[Tool] = &[
         update: &["codex", "update"],
         version: &["codex", "--version"],
         models: None,
+        model: Some("--model"),
         agents: Agents::FlagPrefixed("-c", "developer_instructions="),
     },
     Tool {
@@ -51,6 +55,7 @@ pub const TOOLS: &[Tool] = &[
         update: &["grok", "update"],
         version: &["grok", "version"],
         models: Some(&["grok", "models"]),
+        model: Some("--model"),
         agents: Agents::Flag("--rules"),
     },
     Tool {
@@ -60,6 +65,7 @@ pub const TOOLS: &[Tool] = &[
         update: &["opencode", "upgrade"],
         version: &["opencode", "--version"],
         models: Some(&["opencode", "models"]),
+        model: None,
         agents: Agents::OpencodeEnv,
     },
     Tool {
@@ -69,6 +75,7 @@ pub const TOOLS: &[Tool] = &[
         update: &["omp", "update"],
         version: &["omp", "--version"],
         models: Some(&["omp", "models"]),
+        model: Some("--model"),
         agents: Agents::Flag("--append-system-prompt"),
     },
 ];
@@ -105,6 +112,7 @@ pub struct Switches {
     pub cont: bool,
     pub full: bool,
     pub bare: bool,
+    pub model: Option<String>,
 }
 
 pub fn build(tool: &str, extra: &[String], sw: &Switches, cwd: &Path, home: &Path) -> Launch {
@@ -115,6 +123,9 @@ pub fn build(tool: &str, extra: &[String], sw: &Switches, cwd: &Path, home: &Pat
     }
     if sw.full {
         argv.extend(spec.full.iter().map(|s| s.to_string()));
+    }
+    if let (Some(flag), Some(model)) = (spec.model, &sw.model) {
+        argv.extend([flag.to_string(), model.clone()]);
     }
     let files = if sw.bare { Vec::new() } else { agents_files(tool, cwd, home) };
     let mut env = Vec::new();
@@ -182,7 +193,7 @@ mod tests {
     use super::*;
 
     fn sw(cont: bool, full: bool, bare: bool) -> Switches {
-        Switches { cont, full, bare }
+        Switches { cont, full, bare, model: None }
     }
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -259,6 +270,14 @@ mod tests {
         assert_eq!(l.argv, s(&["claude", "-c", "--model", "opus"]));
         assert!(l.env.is_empty());
         assert!(l.files.is_empty());
+    }
+
+    #[test]
+    fn model_sits_between_switches_and_extra() {
+        let d = Path::new("/");
+        let with = Switches { cont: true, full: false, bare: true, model: Some("gpt-6.1-sol".into()) };
+        let l = build("codex", &s(&["hello"]), &with, d, d);
+        assert_eq!(l.argv, s(&["codex", "resume", "--last", "--model", "gpt-6.1-sol", "hello"]));
     }
 
     #[test]
