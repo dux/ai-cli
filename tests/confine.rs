@@ -19,6 +19,8 @@ use nix::pty::{Winsize, openpty};
 
 const ROWS: u16 = 24;
 const COLS: u16 = 80;
+/// How long a test waits for something it expects to see.
+const PATIENCE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Default)]
 struct Events(Rc<RefCell<Vec<Event>>>);
@@ -126,6 +128,27 @@ impl Screen {
     fn bar(&self) -> Vec<String> {
         bar(&self.term)
     }
+
+    /// The child's rows that hold text.
+    fn shown(&self) -> Vec<String> {
+        (0..ROWS as i32 - 4).map(|l| self.row(l)).filter(|l| !l.is_empty()).collect()
+    }
+
+    /// Pumps until `done` holds, giving up after `PATIENCE`. A fixed wait
+    /// fails on a busy machine and on the first run of a fresh build.
+    fn wait(&mut self, done: impl Fn(&Screen) -> bool) -> bool {
+        let till = Instant::now() + PATIENCE;
+        while !done(self) && Instant::now() < till {
+            self.pump(Duration::from_millis(20), |_| {});
+        }
+        done(self)
+    }
+
+    /// The bar is up and the child has set its terminal mode and said READY.
+    fn ready(&mut self) {
+        let up = self.wait(|s| s.bar()[0].contains("prompt history") && s.shown().contains(&"READY".to_string()));
+        assert!(up, "never ready: {:?} {:?}", self.shown(), self.bar());
+    }
 }
 
 impl Drop for Screen {
@@ -172,7 +195,7 @@ fn nothing_the_child_writes_reaches_the_bar() {
 
     let mut settled: Option<Vec<String>> = None;
     let mut seen_bottom = false;
-    s.pump(Duration::from_millis(3500), |term| {
+    let mut check = |term: &Term<Events>| {
         let bar = bar(term);
         if row(term, 19) == "BOTTOM" {
             seen_bottom = true;
@@ -182,7 +205,12 @@ fn nothing_the_child_writes_reaches_the_bar() {
             None => {}
             Some(want) => assert_eq!(&bar, want, "the bar moved"),
         }
-    });
+    };
+    let started = Instant::now();
+    while s.row(19) != "PROMPT" && started.elapsed() < PATIENCE {
+        s.pump(Duration::from_millis(50), &mut check);
+    }
+    s.pump(Duration::from_millis(300), &mut check);
 
     let bar = settled.expect("the bar was painted");
     assert!(bar[0].contains("prompt history"), "{bar:?}");
@@ -195,7 +223,7 @@ fn scrolled_lines_reach_the_real_scrollback_in_order() {
     let args = sh("seq 1 300; sleep 2");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut s = Screen::start(&args);
-    s.pump(Duration::from_millis(1500), |_| {});
+    s.wait(|s| s.row(18) == "300");
 
     let grid = s.term.grid();
     let top = -(grid.history_size() as i32);
@@ -206,12 +234,12 @@ fn scrolled_lines_reach_the_real_scrollback_in_order() {
 
 #[test]
 fn typed_prompt_is_pinned_and_reaches_the_child() {
-    let args = sh("stty -echo -icanon; while read l; do printf 'got:%s\\n' \"$l\"; done");
+    let args = sh("stty -echo -icanon; echo READY; while read l; do printf 'got:%s\\n' \"$l\"; done");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut s = Screen::start(&args);
-    s.pump(Duration::from_millis(700), |_| {});
+    s.ready();
     s.type_in(b"hello world\r");
-    s.pump(Duration::from_millis(500), |_| {});
+    s.wait(|s| s.bar()[3].contains("hello world") && s.shown().contains(&"got:hello world".to_string()));
 
     assert!(s.bar()[3].contains("hello world"), "{:?}", s.bar());
     let screen: Vec<String> = (0..20).map(|l| s.row(l)).collect();
@@ -220,12 +248,13 @@ fn typed_prompt_is_pinned_and_reaches_the_child() {
 
 #[test]
 fn bang_line_runs_here_and_never_reaches_the_child() {
-    let args = sh("stty -echo -icanon; while read l; do printf 'got:%s\\n' \"$l\"; done");
+    let args = sh("stty -echo -icanon; echo READY; while read l; do printf 'got:%s\\n' \"$l\"; done");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut s = Screen::start(&args);
-    s.pump(Duration::from_millis(700), |_| {});
+    s.ready();
     s.type_in(b"!echo from-shell\r");
-    s.pump(Duration::from_millis(800), |_| {});
+    s.wait(|s| (0..ROWS as i32).any(|l| s.row(l) == "from-shell"));
+    s.pump(Duration::from_millis(300), |_| {});
 
     let bottom: Vec<String> = (0..ROWS as i32).map(|l| s.row(l)).collect();
     assert!(bottom.iter().any(|l| l == "from-shell"), "{bottom:?}");
@@ -235,13 +264,13 @@ fn bang_line_runs_here_and_never_reaches_the_child() {
 
 #[test]
 fn mouse_clicks_on_the_bar_never_reach_the_child() {
-    let args = sh("stty raw -echo; dd bs=1 count=10 2>/dev/null | od -c; sleep 2");
+    let args = sh("stty raw -echo; printf 'READY\\r\\n'; dd bs=1 count=10 2>/dev/null | od -c; sleep 2");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut s = Screen::start(&args);
-    s.pump(Duration::from_millis(700), |_| {});
+    s.ready();
     // Row 22 is a bar row, row 5 is the child's.
     s.type_in(b"\x1b[<0;3;22M\x1b[<0;3;5Mz");
-    s.pump(Duration::from_millis(400), |_| {});
+    s.wait(|s| s.shown().iter().any(|l| l.contains("5   M")));
     let screen: String = (0..20).map(|l| s.row(l)).collect::<Vec<_>>().join("\n");
     assert!(screen.contains("5   M"), "the child row click arrives: {screen}");
     assert!(!screen.contains("2   2"), "the bar click must not: {screen}");
@@ -249,11 +278,10 @@ fn mouse_clicks_on_the_bar_never_reach_the_child() {
 
 #[test]
 fn f10_quits_the_wrapper_and_the_agent_and_clears_the_bar() {
-    let args = sh("trap 'echo got-hup; exit 7' HUP; stty raw -echo; while :; do sleep 0.05; done");
+    let args = sh("trap 'echo got-hup; exit 7' HUP; stty raw -echo; printf 'READY\\r\\n'; while :; do sleep 0.05; done");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut s = Screen::start(&args);
-    s.pump(Duration::from_millis(700), |_| {});
-    assert!(s.bar()[0].contains("prompt history"));
+    s.ready();
 
     let pressed = Instant::now();
     s.type_in(b"\x1b[21~");
@@ -268,4 +296,24 @@ fn f10_quits_the_wrapper_and_the_agent_and_clears_the_bar() {
     assert_eq!(status.code(), Some(7), "the agent got SIGHUP and its exit code is ours");
     assert!(pressed.elapsed() < Duration::from_secs(2));
     assert!(s.bar().iter().all(|r| !r.contains("prompt history")), "bar erased: {:?}", s.bar());
+}
+
+#[test]
+fn sigurg_clears_screen_and_scrollback_but_keeps_the_bar() {
+    let args = sh("seq 1 100; sleep 1.2; printf AFTER; sleep 2");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut s = Screen::start(&args);
+    s.wait(|s| s.row(18) == "100");
+    assert!(s.term.grid().history_size() > 0, "seq reached the real scrollback");
+    assert_eq!(s.row(18), "100", "the last line, above the cursor row");
+
+    unsafe { libc::kill(s.child.id() as i32, libc::SIGURG) };
+    s.wait(|s| s.term.grid().history_size() == 0 && s.shown().is_empty());
+    assert_eq!(s.term.grid().history_size(), 0, "real scrollback cleared");
+    let screen: Vec<String> = (0..20).map(|l| s.row(l)).collect();
+    assert!(screen.iter().all(String::is_empty), "child rows cleared: {screen:?}");
+    assert!(s.bar()[0].contains("prompt history"), "bar kept: {:?}", s.bar());
+
+    s.wait(|s| !s.shown().is_empty());
+    assert_eq!(s.shown(), ["AFTER"], "only new output");
 }
