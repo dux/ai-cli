@@ -166,6 +166,10 @@ pub const WAKE_CHILD: u8 = b'C';
 pub const WAKE_TERM: u8 = b'T';
 pub const WAKE_HUP: u8 = b'H';
 pub const WAKE_THREAD: u8 = b'X';
+/// SIGURG: clear screen and scrollback (Herdr's ⌥⌘K, ~/.config/herdr/clear-pane).
+/// Chosen because its default action is to be ignored: sending it to a
+/// wrapper built before this existed, or to anything else, does no harm.
+pub const WAKE_CLEAR: u8 = b'L';
 
 static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -186,6 +190,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
         libc::SIGWINCH => WAKE_WINCH,
         libc::SIGCHLD => WAKE_CHILD,
         libc::SIGHUP => WAKE_HUP,
+        libc::SIGURG => WAKE_CLEAR,
         _ => WAKE_TERM,
     };
     wake(byte);
@@ -202,7 +207,7 @@ impl Wake {
             set_cloexec(fd)?;
         }
         WAKE_FD.store(fds[1], Ordering::Relaxed);
-        for sig in [libc::SIGWINCH, libc::SIGCHLD, libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+        for sig in [libc::SIGWINCH, libc::SIGCHLD, libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGURG] {
             unsafe {
                 let mut sa: libc::sigaction = std::mem::zeroed();
                 sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;

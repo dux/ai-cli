@@ -99,6 +99,7 @@ The original command line is written to `$XDG_STATE_HOME/llm-wrap/<pid>` (defaul
 It then re-reads the model lists and shows what appeared or disappeared since the last run.
 The model cache is `~/.config/ai-cli/models.json`.
 A TOOL prefix limits the update to that one tool.
+* SIGURG clears the screen and scrollback like iTerm's ⌘K, without telling the agent; the bar stays. Herdr's ⌥⌘K sends it through `~/.config/herdr/clear-pane`, since an outer clear alone would leave the wrapper painting only rows it thinks changed.
 
 ## Files
 

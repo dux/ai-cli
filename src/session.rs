@@ -20,7 +20,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::{Processor, Timeout};
+use alacritty_terminal::vte::ansi::{ClearMode, Handler as _, Processor, Timeout};
 
 use crate::awake::Awake;
 use crate::cli::RunOpts;
@@ -393,8 +393,24 @@ impl Session {
                 let sig = if byte == term::WAKE_HUP { libc::SIGHUP } else { libc::SIGTERM };
                 unsafe { libc::kill(-(self.pty.child.id() as i32), sig) };
             }
+            term::WAKE_CLEAR => self.clear_all(),
             _ => {}
         }
+    }
+
+    /// SIGURG: wipe screen and scrollback like iTerm's ⌘K, in the emulator
+    /// and the real terminal alike, so nothing old is painted back. The child
+    /// is not told; its next output lands on the blank rows. The bar stays.
+    fn clear_all(&mut self) {
+        self.term.clear_screen(ClearMode::All);
+        self.term.clear_screen(ClearMode::Saved);
+        let (rows, cols, child_rows) = (self.render.rows, self.render.cols, self.render.child_rows);
+        self.render.invalidate(&self.term, rows, cols, child_rows);
+        let mut out = String::from("\x1b[3J");
+        out.push_str(&self.render.region());
+        self.emit(out.as_bytes());
+        self.trace("CLR", "SIGURG");
+        self.dirty = true;
     }
 
     fn collect_threads(&mut self) {

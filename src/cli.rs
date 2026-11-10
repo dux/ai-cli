@@ -252,6 +252,7 @@ Examples:
   ai c -- --model opus
   ai -l 5 -a
   ai -x -- htop
+SIGURG (Herdr's ⌥⌘K) clears screen and scrollback, the bar stays; the agent is not told.
   ai --update
   ai -H resize bar
 "
