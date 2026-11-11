@@ -36,6 +36,9 @@ pub struct Renderer {
     bar: Vec<String>,
     bar_dirty: bool,
     hist_seen: usize,
+    /// The child cleared its scrollback, and so the real one: everything in
+    /// the emulator's main history goes back in at the next main-screen frame.
+    hist_reset: bool,
     was_alt: bool,
     out: String,
 }
@@ -50,6 +53,7 @@ impl Renderer {
             bar: Vec::new(),
             bar_dirty: true,
             hist_seen: 0,
+            hist_reset: false,
             was_alt: false,
             out: String::new(),
         }
@@ -98,14 +102,17 @@ impl Renderer {
             term.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
         }
 
+        self.hist_reset |= history_reset;
         let alt = term.mode().contains(TermMode::ALT_SCREEN);
         if !alt {
             let h = term.grid().history_size();
-            if history_reset {
-                self.hist_seen = 0;
-            }
             if self.was_alt {
                 self.hist_seen = h;
+            }
+            // After the alt-screen skip: a child redrawing on resize leaves
+            // the alt screen, clears scrollback and replays, all in one frame.
+            if std::mem::take(&mut self.hist_reset) {
+                self.hist_seen = 0;
             }
             if h > self.hist_seen {
                 self.push_history(term, h - self.hist_seen);

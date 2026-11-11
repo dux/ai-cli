@@ -382,9 +382,10 @@ impl Session {
     fn on_wake(&mut self, byte: u8) {
         match byte {
             term::WAKE_WINCH => {
-                if let Some(size) = term::size_of(io::stdout().as_raw_fd())
-                    && size != self.size
-                {
+                // Even at the size we already have: the terminal may have been
+                // through another one since (waking from sleep, a fullscreen
+                // game), and its resize reset the scroll region and moved rows.
+                if let Some(size) = term::size_of(io::stdout().as_raw_fd()) {
                     let bar = self.render.bar_rows();
                     self.relayout(size, bar);
                 }

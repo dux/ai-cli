@@ -121,6 +121,14 @@ impl Screen {
         f.write_all(bytes).unwrap();
     }
 
+    /// The user's terminal changes size: it resizes its own screen, which
+    /// resets its scroll region, then tells the PTY.
+    fn resize(&mut self, rows: u16) {
+        self.term.resize(Dims(rows as usize, COLS as usize));
+        let ws = libc::winsize { ws_row: rows, ws_col: COLS, ws_xpixel: 0, ws_ypixel: 0 };
+        unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+    }
+
     fn row(&self, line: i32) -> String {
         row(&self.term, line)
     }
@@ -230,6 +238,48 @@ fn scrolled_lines_reach_the_real_scrollback_in_order() {
     let lines: Vec<String> = (top..ROWS as i32 - 4).map(|l| s.row(l)).filter(|l| !l.is_empty()).collect();
     let numbers: Vec<u32> = lines.iter().filter_map(|l| l.parse().ok()).collect();
     assert_eq!(numbers, (1..=300).collect::<Vec<_>>());
+}
+
+#[test]
+fn scrollback_survives_a_resize_that_ends_at_the_old_size() {
+    // Waking from sleep or leaving a fullscreen game: the terminal goes
+    // through another size and back before the wrapper reads it.
+    let args = sh("stty -echo -icanon; echo READY; read l; seq 1 100; sleep 2");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut s = Screen::start(&args);
+    s.ready();
+    s.resize(ROWS + 6);
+    s.resize(ROWS);
+    s.pump(Duration::from_millis(200), |_| {});
+    s.type_in(b"\r");
+    s.wait(|s| s.row(18) == "100");
+
+    let top = -(s.term.grid().history_size() as i32);
+    let lines: Vec<String> = (top..ROWS as i32 - 4).map(|l| s.row(l)).filter(|l| !l.is_empty()).collect();
+    assert!(lines.iter().all(|l| !l.contains("prompt history")), "the bar was scrolled into history: {lines:?}");
+    let numbers: Vec<u32> = lines.iter().filter_map(|l| l.parse().ok()).collect();
+    assert_eq!(numbers, (1..=100).collect::<Vec<_>>());
+    assert!(s.bar()[0].contains("prompt history"), "bar kept: {:?}", s.bar());
+}
+
+#[test]
+fn scrollback_replayed_on_leaving_the_alt_screen_is_kept() {
+    // omp on resize: a moment in the alt screen, then one write that leaves
+    // it, clears screen and scrollback and replays the whole transcript.
+    let replay: String = (101..=150).map(|i| format!("{i}\\n")).collect();
+    let script = format!(
+        "seq 1 50; printf '\\033[?1049hALT'; sleep 0.4; printf '\\033[?1049l\\033[H\\033[2J\\033[3J{replay}'; sleep 2"
+    );
+    let args = sh(&script);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut s = Screen::start(&args);
+    s.wait(|s| s.row(18) == "150");
+    s.pump(Duration::from_millis(200), |_| {});
+
+    let top = -(s.term.grid().history_size() as i32);
+    let lines: Vec<String> = (top..ROWS as i32 - 4).map(|l| s.row(l)).filter(|l| !l.is_empty()).collect();
+    let numbers: Vec<u32> = lines.iter().filter_map(|l| l.parse().ok()).collect();
+    assert_eq!(numbers, (101..=150).collect::<Vec<_>>(), "{lines:?}");
 }
 
 #[test]
