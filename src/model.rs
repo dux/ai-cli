@@ -46,7 +46,7 @@ fn claude(projects: &Path) -> Vec<String> {
         .filter(|f| f.extension().is_some_and(|e| e == "jsonl"))
         .filter_map(|f| Some((f.metadata().ok()?.modified().ok()?, f)))
         .collect();
-    sessions.sort_by(|a, b| b.0.cmp(&a.0));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
     let model = Regex::new(r#""model":"([^"<][^"]*)""#).unwrap();
     let mut out = Vec::new();
     for (_, file) in sessions.iter().take(CLAUDE_SESSIONS) {
