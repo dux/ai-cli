@@ -5,8 +5,8 @@ use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::text::{GRAY, RESET};
-use crate::{cli, launch, pane, term};
+use crate::text::{GRAY, RESET, has_words};
+use crate::{bang, cli, launch, pane, term};
 
 /// Past this size the history is cut back to its newest HISTORY_KEEP bytes.
 const HISTORY_MAX: u64 = 1 << 20;
@@ -34,6 +34,7 @@ pub struct Defaults {
     pub bare: bool,
     pub awake: bool,
     pub lines: Option<usize>,
+    pub commands: Option<PathBuf>,
 }
 
 /// A missing file is all defaults; a bad line is an error naming it.
@@ -114,6 +115,8 @@ fn parse_defaults(text: &str) -> Result<Defaults, String> {
             "bare" => d.bare = flag()?,
             "awake" => d.awake = flag()?,
             "lines" => d.lines = Some(cli::parse_keep(value).map_err(|_| err(format!("lines takes a number, got {value:?}")))?),
+            "commands" if value.is_empty() => return Err(err("commands takes a folder".into())),
+            "commands" => d.commands = Some(bang::expand(value)),
             _ => return Err(err(format!("unknown key {key:?}"))),
         }
     }
@@ -156,12 +159,8 @@ pub fn print_history(words: &[String]) -> i32 {
     0
 }
 
-fn matching<'a>(text: &'a str, words: &[String]) -> impl Iterator<Item = &'a str> {
-    let words: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
-    text.lines().filter(move |line| {
-        let line = line.to_lowercase();
-        words.iter().all(|w| line.contains(w.as_str()))
-    })
+fn matching<'a>(text: &'a str, words: &'a [String]) -> impl Iterator<Item = &'a str> {
+    text.lines().filter(move |line| has_words(line, words))
 }
 
 /// Called as an agent starts. A line another wrapper appends between the
@@ -203,7 +202,8 @@ mod tests {
     #[test]
     fn defaults_parse_with_comments_and_prefixes() {
         let d = parse_defaults("# mine\n\ntool = cod\nfull = true # always\nawake=false\nlines = 50\n").unwrap();
-        assert_eq!(d, Defaults { tool: Some("codex"), full: true, bare: false, awake: false, lines: Some(20) });
+        assert_eq!(d, Defaults { tool: Some("codex"), full: true, bare: false, awake: false, lines: Some(20), commands: None });
+        assert_eq!(parse_defaults("commands = /x/y/../z").unwrap().commands, Some(PathBuf::from("/x/z")));
     }
 
     #[test]

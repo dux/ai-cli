@@ -72,7 +72,7 @@ fn target(path: Option<&str>) -> PathBuf {
 
 /// Ruby's File.expand_path: ~ and relative paths made absolute, `.`/`..`
 /// resolved lexically.
-fn expand(p: &str) -> PathBuf {
+pub fn expand(p: &str) -> PathBuf {
     let raw = if p == "~" {
         home()
     } else if let Some(rest) = p.strip_prefix("~/") {

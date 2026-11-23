@@ -1,5 +1,5 @@
-//! Drawing shared by everything that puts a row in the bar: the prompt history
-//! and the ! output pane.
+//! Drawing shared by everything that puts a row in the bar: the prompt history,
+//! the ! output pane and the : picker.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -8,6 +8,7 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const DIM: &str = "\x1b[2m";
 pub const GRAY: &str = "\x1b[38;5;245m";
 pub const REV: &str = "\x1b[7m";
+pub const BOLD: &str = "\x1b[1m";
 pub const RESET: &str = "\x1b[0m";
 
 /// Dashed, and deliberately not the solid U+2500 "─": a pane watcher (Herdr)
@@ -62,6 +63,12 @@ pub fn rule(cols: usize, label: &str) -> String {
 
 pub fn dim(s: &str) -> String {
     format!("{DIM}{s}{RESET}")
+}
+
+/// Every word somewhere in `hay`, any case: `ai -H` and the : picker.
+pub fn has_words(hay: &str, words: &[String]) -> bool {
+    let hay = hay.to_lowercase();
+    words.iter().all(|w| hay.contains(&w.to_lowercase()))
 }
 
 /// Ruby's `scrub('')`: invalid UTF-8 is dropped, not replaced.

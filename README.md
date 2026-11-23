@@ -20,6 +20,7 @@ ai -H [WORDS...]
 `TOOL` is a prefix of `claude`, `codex`, `grok`, `opencode` or `omp`; the first match wins.
 So `c` is claude, `co` codex, `o` opencode and `om` omp.
 No tool means the one you ran last, kept as `tool` in the [config file](#config); claude before any run.
+A first word that is no prefix but names a command on `PATH` runs that command wrapped, like `-x`.
 `MODEL` is a piece of a model name, completed to the [model you last used](#model) that holds it.
 No tool name holds a digit, so a first word with one is the `MODEL` for the tool you ran last: `ai 5.5`.
 
@@ -98,6 +99,14 @@ The bar is only redrawn when its own content changes.
 * The bar shows your last prompts, rebuilt from keystrokes; history recall and autocomplete are not seen.
 * A line starting with `!` never reaches the agent: it runs in `$SHELL` and the bar grows to show its output until you type again.
   `!!` sends a literal `!`, a bare `!` closes the output.
+* A line starting with `:` opens the command picker in the bar: every `*.md` in the [`commands`](#config) folder, by file name, with its first line as the description.
+  Typing filters (every word in the name or description, any case), Up/Down or Ctrl-P/Ctrl-N move, Esc, Ctrl-C or Backspace on an empty search close it.
+  Enter pastes the file's text into the agent's input with a blank line after it, and you type your prompt below it.
+  The bar and the history show the prompt as `:plan what you typed`.
+  `::` sends a literal `:`; `-x` runs have no picker, so `:` belongs to the command.
+* A prompt ending in `?` gets `question.md` from the same folder after it: on Enter its text is pasted below a blank line, then the Enter goes through.
+  The bar and the history show `:question your prompt?`.
+  A lone `?`, a prompt that already starts with a picked command, a missing `question.md` and `-x` runs are left alone.
 * F10 quits the wrapper and the agent (SIGHUP, so it can save its session).
 * SIGURG clears the screen and scrollback like iTerm's ⌘K, without telling the agent; the bar stays. Herdr's ⌥⌘K sends it through `~/.config/herdr/clear-pane`, since an outer clear alone would leave the wrapper painting only rows it thinks changed.
 * While the agent works on a prompt the bar's rule shows `working 1m12s`.
@@ -143,11 +152,13 @@ full = true
 bare = false
 awake = true
 lines = 5
+commands = ~/dev/ai/command
 ```
 
 `tool` takes a prefix like the command line; a TOOL given on the command line wins, and so does `-l`.
 Every agent start sets `tool` to that agent, leaving the other lines as they are.
 The switches can only be turned on, so a `true` here applies to every run.
+`commands` is the picker's folder, `~/dev/ai/command` when not set.
 Only `lines` applies to `-x` runs.
 A bad line stops `ai` with its line number, e.g. `ai: ~/.config/ai-cli/config:3: unknown key "x"`.
 

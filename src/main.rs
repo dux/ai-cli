@@ -7,6 +7,7 @@ mod keys;
 mod launch;
 mod model;
 mod pane;
+mod picker;
 mod probe;
 mod render;
 mod scan;

@@ -1,5 +1,6 @@
 //! Command line: `ai [TOOL] [MODEL] [-c] [-f] [-b] [-a] [-u] [-l N] [-x] [-H] [-h] [-- extra...]`.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Defaults};
@@ -7,6 +8,8 @@ use crate::{launch, model};
 
 pub const DEFAULT_KEEP: usize = 3;
 const MAX_KEEP: usize = 20;
+/// Where the : picker finds its commands, under HOME, unless the config says.
+const DEFAULT_COMMANDS: &str = "dev/ai/command";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -27,6 +30,8 @@ pub struct RunOpts {
     /// Set for agents: the folder they started in, logged with each prompt.
     /// None for -x, which keeps no history and has no turns.
     pub agent_dir: Option<PathBuf>,
+    /// The : picker's folder; None for -x, where : is the command's own.
+    pub commands: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -48,6 +53,22 @@ pub fn parse_keep(v: &str) -> Result<usize, String> {
         .map_err(|_| format!("--lines takes a number, got {v:?}"))
 }
 
+/// A word that is no tool prefix still runs as a plain command if `exec` would
+/// find it: on PATH, or as a path of its own.
+fn command_exists(name: &str) -> bool {
+    let runnable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if name.is_empty() {
+        return false;
+    }
+    if name.contains('/') {
+        return runnable(Path::new(name));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| runnable(&dir.join(name))))
+}
+
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -61,6 +82,17 @@ pub fn parse_in(
     cwd: &Path,
     home: &Path,
     defaults: impl FnOnce() -> Result<Defaults, String>,
+) -> Result<Command, String> {
+    parse_with(args, cwd, home, defaults, command_exists)
+}
+
+/// `exists` tells whether a word that is no tool prefix can be run at all.
+fn parse_with(
+    args: &[String],
+    cwd: &Path,
+    home: &Path,
+    defaults: impl FnOnce() -> Result<Defaults, String>,
+    exists: impl Fn(&str) -> bool,
 ) -> Result<Command, String> {
     let mut f = Flags::default();
     let mut positional: Vec<String> = Vec::new();
@@ -154,20 +186,20 @@ pub fn parse_in(
         if argv.is_empty() {
             return Err("-x needs a command, e.g. ai -x -- htop".into());
         }
-        let mut origin = vec!["ai".to_string(), "-x".to_string()];
-        if f.awake {
-            origin.push("-a".into());
-        }
-        origin.extend(lines_origin("-l"));
-        origin.push("--".into());
-        origin.extend(argv.iter().cloned());
-        let opts = RunOpts { argv, env: vec![], agent_files: vec![], origin, keep, awake: f.awake, agent_dir: None };
-        return Ok(Command::Run(opts));
+        return Ok(Command::Run(exec_run(&f, argv, keep)));
     }
 
     // No tool name holds a digit, so a first word with one is the MODEL.
     let named = prefix.as_deref().filter(|p| !p.contains(|c: char| c.is_ascii_digit()));
-    let tool = launch::tool(named.or(d.tool)).ok_or_else(unknown)?;
+    let Some(tool) = launch::tool(named.or(d.tool)) else {
+        // A first word that is no tool may still be a command: `ai htop`.
+        let Some(cmd) = named.filter(|c| exists(c)) else { return Err(unknown()) };
+        if f.cont || f.full || f.bare {
+            return Err(format!("{cmd} is no agent tool; -c, -f and -b only apply to agents"));
+        }
+        let argv: Vec<String> = positional.into_iter().chain(passthrough).collect();
+        return Ok(Command::Run(exec_run(&f, argv, keep)));
+    };
 
     f.full |= d.full;
     f.bare |= d.bare;
@@ -193,7 +225,23 @@ pub fn parse_in(
     origin.push("--".into());
     origin.extend(extra);
     let agent_dir = Some(cwd.to_path_buf());
-    Ok(Command::Run(RunOpts { argv: l.argv, env: l.env, agent_files: l.files, origin, keep, awake: f.awake, agent_dir }))
+    let commands = Some(d.commands.unwrap_or_else(|| home.join(DEFAULT_COMMANDS)));
+    Ok(Command::Run(RunOpts { argv: l.argv, env: l.env, agent_files: l.files, origin, keep, awake: f.awake, agent_dir, commands }))
+}
+
+/// A plain command, wrapped like -x: no AGENTS.md, no history, no turns.
+/// The origin still says `-x`, so Herdr's clone-tab reopens the same run.
+fn exec_run(f: &Flags, argv: Vec<String>, keep: usize) -> RunOpts {
+    let mut origin = vec!["ai".to_string(), "-x".to_string()];
+    if f.awake {
+        origin.push("-a".into());
+    }
+    if keep != DEFAULT_KEEP {
+        origin.extend(["-l".to_string(), keep.to_string()]);
+    }
+    origin.push("--".into());
+    origin.extend(argv.iter().cloned());
+    RunOpts { argv, env: vec![], agent_files: vec![], origin, keep, awake: f.awake, agent_dir: None, commands: None }
 }
 
 pub fn help() -> String {
@@ -206,7 +254,8 @@ Start an agent CLI inside the ai wrapper, with the same switches whichever one i
 
 TOOL is a prefix of claude, codex, grok, opencode or omp - first match wins, so `c` is
 claude, `co` codex, `o` opencode and `om` omp. No tool means the one you ran last, kept
-as `tool` in the config file below (claude before any run).
+as `tool` in the config file below (claude before any run). A first word that is no
+prefix but names a command on PATH runs that command wrapped, like -x.
 
 MODEL is a piece of a model name, completed to the model you last used in that tool
 whose name holds it: `ai om 5-2` starts omp with anthropic/claude-fable-5-2. It is
@@ -292,7 +341,7 @@ mod tests {
 
     fn p(v: &[&str]) -> Result<Command, String> {
         let d = Path::new("/nonexistent-home");
-        parse_in(&s(v), d, d, || Ok(Defaults::default()))
+        parse_with(&s(v), d, d, || Ok(Defaults::default()), |_| false)
     }
 
     fn run(v: &[&str]) -> RunOpts {
@@ -362,6 +411,28 @@ mod tests {
     }
 
     #[test]
+    fn a_word_that_is_no_tool_runs_as_a_command_when_it_exists() {
+        let home = Path::new("/nonexistent-home");
+        let run_cmd = |v: &[&str]| match parse_with(&s(v), home, home, || Ok(Defaults::default()), |c| c == "htop").unwrap() {
+            Command::Run(r) => r,
+            other => panic!("{other:?}"),
+        };
+        let r = run_cmd(&["htop", "--", "-d", "5"]);
+        assert_eq!(r.argv, s(&["htop", "-d", "5"]));
+        assert_eq!(r.origin, s(&["ai", "-x", "--", "htop", "-d", "5"]));
+        assert!(r.agent_files.is_empty() && r.env.is_empty() && r.agent_dir.is_none());
+        let r = run_cmd(&["htop", "-al", "6"]);
+        assert_eq!(r.argv, s(&["htop"]));
+        assert_eq!(r.origin, s(&["ai", "-x", "-a", "-l", "6", "--", "htop"]));
+        assert!((r.keep, r.awake) == (6, true));
+        assert_eq!(parse_with(&s(&["htop", "-f"]), home, home, || Ok(Defaults::default()), |c| c == "htop").unwrap_err(), "htop is no agent tool; -c, -f and -b only apply to agents");
+        // A typo stays a tool error, and the config's tool gets no fallback.
+        assert!(parse_with(&s(&["htop"]), home, home, || Ok(Defaults::default()), |_| false).is_err());
+        let broken_tool = || Ok(Defaults { tool: Some("x"), ..Defaults::default() });
+        assert!(parse_with(&s(&[]), home, home, broken_tool, |_| true).is_err());
+    }
+
+    #[test]
     fn a_first_word_with_a_digit_is_the_model_for_the_default_tool() {
         let r = run(&["5.5", "hi"]);
         assert_eq!(r.argv, s(&["claude", "--model", "5.5", "hi"]));
@@ -410,7 +481,7 @@ mod tests {
     #[test]
     fn config_defaults_sit_under_the_command_line() {
         let home = Path::new("/nonexistent-home");
-        let d = || Ok(Defaults { tool: Some("codex"), full: true, bare: false, awake: true, lines: Some(6) });
+        let d = || Ok(Defaults { tool: Some("codex"), full: true, bare: false, awake: true, lines: Some(6), commands: None });
         let run_d = |v: &[&str]| match parse_in(&s(v), home, home, d).unwrap() {
             Command::Run(r) => r,
             other => panic!("{other:?}"),
@@ -418,12 +489,14 @@ mod tests {
         let r = run_d(&[]);
         assert_eq!(r.argv[..2], s(&["codex", "--dangerously-bypass-approvals-and-sandbox"]));
         assert_eq!((r.keep, r.awake), (6, true));
+        assert_eq!(r.commands, Some(home.join("dev/ai/command")));
         let r = run_d(&["c", "-l2"]);
         assert_eq!(r.argv[0], "claude");
         assert_eq!(r.keep, 2);
         let r = run_d(&["-x", "--", "htop"]);
         assert_eq!(r.argv, s(&["htop"]));
         assert_eq!((r.keep, r.awake), (6, false), "-x takes only lines from the config");
+        assert_eq!(r.commands, None, "-x has no : picker");
         let broken = || Err("config:1: unknown key \"x\"".to_string());
         assert_eq!(parse_in(&s(&[]), home, home, broken).unwrap_err(), "config:1: unknown key \"x\"");
         assert_eq!(parse_in(&s(&["-H"]), home, home, broken).unwrap(), Command::History { words: vec![] });

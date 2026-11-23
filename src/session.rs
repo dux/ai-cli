@@ -176,7 +176,7 @@ impl Session {
         let config = Config { scrolling_history: HISTORY, kitty_keyboard: false, ..Config::default() };
         let term = Term::new(config, &Dims { lines: child_rows, cols: size.cols as usize }, events.clone());
 
-        let mut keys = KeyBuffer::new(opts.keep);
+        let mut keys = KeyBuffer::new(opts.keep, opts.commands.clone());
         keys.set_child_rows(child_rows as u16);
 
         let (awake, awake_rx) = if opts.awake {
@@ -348,7 +348,7 @@ impl Session {
         let cols = self.size.cols as usize;
         match &self.pane {
             Some(p) => p.lines(cols, self.max_bar()),
-            None => self.keys.lines(cols),
+            None => self.keys.lines(cols, self.max_bar()),
         }
     }
 
@@ -356,8 +356,8 @@ impl Session {
         (self.size.rows as usize).saturating_sub(MIN_CHILD).max(2)
     }
 
-    /// The bar grows to show ! output and shrinks back after; the child's
-    /// screen gives up or takes back the rows.
+    /// The bar grows to show ! output and the : picker and shrinks back
+    /// after; the child's screen gives up or takes back the rows.
     fn relayout_for_bar(&mut self, wanted: usize) {
         let bar_rows = wanted.clamp(1, self.max_bar());
         if bar_rows != self.render.bar_rows() {

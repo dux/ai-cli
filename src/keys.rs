@@ -4,18 +4,23 @@
 //! Reads can split a UTF-8 character or an escape sequence, so bytes are
 //! accumulated raw and only decoded when rendered.
 
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
 
+use crate::picker::{Command, Picker};
 use crate::text::{CYAN, DIM, RESET, REV, YELLOW, clip, rule, scrub, strip};
 
 const MAX_LEN: usize = 4096;
 const NO_PROMPTS: &str = "(nothing typed yet)";
 const LABEL: &str = "prompt history";
+/// The command a prompt ending in ? gets after it.
+const QUESTION: &str = "question";
 
 const BANG: u8 = 0x21;
+const COLON: u8 = 0x3a;
 const CR: u8 = 0x0d;
 const LF: u8 = 0x0a;
 const ESC: u8 = 0x1b;
@@ -26,6 +31,8 @@ const DEL: u8 = 0x7f;
 const CTRL_C: u8 = 0x03;
 const CTRL_U: u8 = 0x15;
 const CTRL_W: u8 = 0x17;
+const CTRL_N: u8 = 0x0e;
+const CTRL_P: u8 = 0x10;
 
 /// Introducers of string sequences (OSC, DCS, SOS, PM, APC): run to BEL or ST.
 const STRING_INTRO: [u8; 5] = [0x5d, 0x50, 0x58, 0x5e, 0x5f];
@@ -49,6 +56,9 @@ static SGR_MOUSE: LazyLock<BytesRegex> =
 /// CSI 21 [; <mods> [: <event>]] ~   (F10, legacy and kitty alike)
 static F10_KEY: LazyLock<BytesRegex> =
     LazyLock::new(|| BytesRegex::new(r"\x1b\[21(?:;(\d*)(?::(\d+))?)?~").unwrap());
+/// CSI [1 ; <mods> [: <event>]] A|B   (Up and Down, legacy and kitty alike)
+static ARROW: LazyLock<BytesRegex> =
+    LazyLock::new(|| BytesRegex::new(r"\A\x1b\[(?:1;\d*(?::(\d+))?)?([AB])\z").unwrap());
 
 /// The event of an unmodified F10 in `m` (1 press, 2 repeat, 3 release), or
 /// None when it carries a modifier and is the child's to have.
@@ -67,6 +77,14 @@ pub fn has_f10(data: &[u8]) -> bool {
 static HSPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\r\x0b\x0c]+").unwrap());
 static BREAKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" ?\n+ ?").unwrap());
 
+/// What the line being typed is for. A `!` or `:` in the first column takes
+/// the line away from the child until it is done with.
+enum Mode {
+    Line,
+    Bang,
+    Pick(Picker),
+}
+
 pub struct KeyBuffer {
     keep: usize,
     /// Newest first.
@@ -76,13 +94,15 @@ pub struct KeyBuffer {
     /// Raw bytes still owed to an X10 mouse report (`ESC [ M` + 3).
     x10: u8,
     paste: bool,
-    bang: bool,
+    mode: Mode,
     bangs: Vec<String>,
+    /// The : picker's folder; None leaves : to the child.
+    commands: Option<PathBuf>,
     /// Prompts submitted in the last feed, repeats included, for the history file.
     sent: Vec<String>,
     pass: Vec<u8>,
     hold: Vec<u8>,
-    /// The keystroke that ended a ! line is ours, not the child's.
+    /// The keystroke that ended a ! or : line is ours, not the child's.
     swallow: bool,
     /// The sequence in `hold` is a mouse report aimed at the bar.
     drop: bool,
@@ -103,7 +123,7 @@ fn is_space(b: u8) -> bool {
 }
 
 impl KeyBuffer {
-    pub fn new(keep: usize) -> Self {
+    pub fn new(keep: usize, commands: Option<PathBuf>) -> Self {
         KeyBuffer {
             keep,
             prompts: Vec::new(),
@@ -111,8 +131,9 @@ impl KeyBuffer {
             esc: None,
             x10: 0,
             paste: false,
-            bang: false,
+            mode: Mode::Line,
             bangs: Vec::new(),
+            commands,
             sent: Vec::new(),
             pass: Vec::new(),
             hold: Vec::new(),
@@ -126,7 +147,8 @@ impl KeyBuffer {
     }
 
     /// Bytes the child may see from the last feed: everything, until a line
-    /// starts with !, and then nothing until that line is done with.
+    /// starts with ! or :, and then nothing until that line is done with -
+    /// except the text of a picked command, as a paste.
     pub fn pass(&self) -> &[u8] {
         &self.pass
     }
@@ -153,7 +175,12 @@ impl KeyBuffer {
 
     #[cfg(test)]
     pub fn bang(&self) -> bool {
-        self.bang
+        matches!(self.mode, Mode::Bang)
+    }
+
+    #[cfg(test)]
+    pub fn picking(&self) -> bool {
+        matches!(self.mode, Mode::Pick(_))
     }
 
     /// The line being typed right now, for the debug trace.
@@ -186,16 +213,26 @@ impl KeyBuffer {
 
         for &b in bytes {
             self.hold.push(b);
-            let was = self.bang;
+            let was = self.taken();
             let hit = if self.esc.is_some() { self.escape(b) } else { self.plain(b) };
-            // A ! line redraws on every keystroke: the bar is the only place
-            // it is shown.
-            if hit || self.bang || was {
+            // A ! or : line redraws on every keystroke: the bar is the only
+            // place it is shown.
+            if hit || was || self.taken() {
                 changed = true;
+            }
+            if let Mode::Pick(p) = &mut self.mode {
+                p.search(&decode(self.buf.get(1..).unwrap_or_default()));
             }
             if self.esc.is_none() {
                 self.release();
             }
+        }
+
+        // A lone ESC ending a read is the Escape key: it closes the picker.
+        if matches!(self.mode, Mode::Pick(_)) && self.esc.as_deref() == Some(&[ESC]) {
+            self.esc = None;
+            self.clear_line();
+            changed = true;
         }
 
         // A sequence still arriving goes to the child now, as in Ruby - unless
@@ -207,9 +244,18 @@ impl KeyBuffer {
         changed
     }
 
+    /// The line is the wrapper's, not the child's.
+    fn taken(&self) -> bool {
+        !matches!(self.mode, Mode::Line)
+    }
+
     /// The whole bar: the labelled rule, then the pinned prompts oldest first
-    /// so the newest lands on the last line.
-    pub fn lines(&self, cols: usize) -> Vec<String> {
+    /// so the newest lands on the last line. The picker takes the bar over;
+    /// `max` is everything the bar may take.
+    pub fn lines(&self, cols: usize, max: usize) -> Vec<String> {
+        if let Mode::Pick(p) = &self.mode {
+            return p.lines(cols, max);
+        }
         let mut rows: Vec<String> = (0..self.keep)
             .map(|slot| {
                 let age = self.keep - 1 - slot;
@@ -222,7 +268,7 @@ impl KeyBuffer {
             })
             .collect();
 
-        if self.bang
+        if matches!(self.mode, Mode::Bang)
             && let Some(last) = rows.last_mut()
         {
             *last = self.typing_row(cols);
@@ -265,7 +311,7 @@ impl KeyBuffer {
         if self.hold.is_empty() {
             return;
         }
-        if !(self.bang || self.swallow || self.drop) {
+        if !(self.taken() || self.swallow || self.drop) {
             self.pass.extend_from_slice(&self.hold);
         }
         self.swallow = false;
@@ -285,6 +331,9 @@ impl KeyBuffer {
             DEL | BS => self.chop_char(),
             CTRL_U | CTRL_C => self.clear_line(),
             CTRL_W => self.drop_word(),
+            CTRL_P | CTRL_N => {
+                self.step(b == CTRL_N);
+            }
             TAB => {} // completion text is inserted by the app
             _ if b >= 0x20 => self.append_byte(b),
             _ => {}
@@ -350,7 +399,7 @@ impl KeyBuffer {
 
         if intro == 0x4f {
             self.esc = None; // SS3 is always three bytes
-            return false;
+            return matches!(b, b'A' | b'B') && self.step(b == b'B');
         }
 
         if (0x40..=0x7e).contains(&b) {
@@ -376,6 +425,9 @@ impl KeyBuffer {
             b"\x1b[200~" => self.paste = true,
             b"\x1b[201~" => self.paste = false,
             _ => {
+                if self.picking_arrow(seq) {
+                    return true;
+                }
                 if let Some(m) = F10_KEY.captures(seq).filter(|m| m.get(0).unwrap().len() == seq.len())
                     && let Some(event) = f10_event(&m)
                 {
@@ -428,7 +480,15 @@ impl KeyBuffer {
                 self.chop_char();
                 return false;
             }
-            9 | 27 => return false,
+            9 => return false,
+            27 => {
+                // Escape under the kitty protocol: closes the picker.
+                if !matches!(self.mode, Mode::Pick(_)) {
+                    return false;
+                }
+                self.clear_line();
+                return true;
+            }
             _ => {}
         }
 
@@ -437,6 +497,9 @@ impl KeyBuffer {
             match code {
                 117 | 99 => self.clear_line(),
                 119 => self.drop_word(),
+                112 | 110 => {
+                    self.step(code == 110);
+                }
                 _ => {}
             }
             return false;
@@ -472,7 +535,7 @@ impl KeyBuffer {
     }
 
     fn append_byte(&mut self, b: u8) {
-        if b == BANG && !self.bang_char() {
+        if matches!(b, BANG | COLON) && !self.first_column(b) {
             return;
         }
         if self.buf.len() < MAX_LEN {
@@ -481,7 +544,9 @@ impl KeyBuffer {
     }
 
     fn append(&mut self, s: &str) {
-        if s == "!" && !self.bang_char() {
+        if let &[b @ (BANG | COLON)] = s.as_bytes()
+            && !self.first_column(b)
+        {
             return;
         }
         if self.buf.len() < MAX_LEN {
@@ -489,30 +554,54 @@ impl KeyBuffer {
         }
     }
 
-    /// A ! in the first column is ours; typed twice it is handed back, so the
-    /// agent gets one. False when the character must not be appended.
-    fn bang_char(&mut self) -> bool {
-        if self.bang && self.buf == b"!" {
-            self.bang = false;
+    /// A ! or : in the first column is ours: a shell line, or the command
+    /// picker when there is a folder for it. Typed twice it is handed back,
+    /// so the agent gets one. False when the character must not be appended.
+    fn first_column(&mut self, b: u8) -> bool {
+        if self.taken() && self.buf == [b] {
+            self.mode = Mode::Line;
             return false;
         }
         if self.buf.is_empty() && !self.paste {
-            self.bang = true;
+            match (b, &self.commands) {
+                (BANG, _) => self.mode = Mode::Bang,
+                (_, Some(dir)) => self.mode = Mode::Pick(Picker::open(dir)),
+                _ => {}
+            }
         }
         true
     }
 
+    /// Up and Down move the picker's selection; release events do nothing.
+    fn picking_arrow(&mut self, seq: &[u8]) -> bool {
+        if !matches!(self.mode, Mode::Pick(_)) {
+            return false;
+        }
+        let Some(m) = ARROW.captures(seq) else { return false };
+        if parse::<i64>(m.get(1)) != Some(3) {
+            self.step(&m[2] == b"B");
+        }
+        true
+    }
+
+    /// True when the picker is open and took the step.
+    fn step(&mut self, down: bool) -> bool {
+        let Mode::Pick(p) = &mut self.mode else { return false };
+        p.step(down);
+        true
+    }
+
     fn clear_line(&mut self) {
-        self.end_bang();
+        self.end_mode();
         self.buf.clear();
     }
 
-    /// Ending a ! line takes the keystroke that ended it along.
-    fn end_bang(&mut self) {
-        if !self.bang {
+    /// Ending a ! or : line takes the keystroke that ended it along.
+    fn end_mode(&mut self) {
+        if !self.taken() {
             return;
         }
-        self.bang = false;
+        self.mode = Mode::Line;
         self.swallow = true;
     }
 
@@ -527,7 +616,7 @@ impl KeyBuffer {
         }
         self.buf.truncate(i);
         if self.buf.is_empty() {
-            self.end_bang();
+            self.end_mode();
         }
     }
 
@@ -540,13 +629,23 @@ impl KeyBuffer {
             self.buf.pop();
         }
         if self.buf.is_empty() {
-            self.end_bang();
+            self.end_mode();
         }
     }
 
     fn submit(&mut self) -> bool {
+        // A picked command goes to the child as a paste and the line carries
+        // on from it, so the bar and history read `:name what you typed`.
+        if let Mode::Pick(p) = &self.mode {
+            let Some(c) = p.chosen() else { return false };
+            let line = format!(":{} ", c.name);
+            self.pass.extend_from_slice(c.paste().as_bytes());
+            self.end_mode();
+            self.buf = line.into_bytes();
+            return true;
+        }
         let text = decode(&self.buf);
-        let bang = self.bang;
+        let bang = matches!(self.mode, Mode::Bang);
         let raw = std::mem::take(&mut self.buf);
         self.clear_line();
 
@@ -558,6 +657,7 @@ impl KeyBuffer {
         if text.is_empty() {
             return false;
         }
+        let text = self.ask(text);
         self.sent.push(text.clone());
         if self.prompts.first() == Some(&text) {
             return false;
@@ -565,6 +665,19 @@ impl KeyBuffer {
         self.prompts.insert(0, text);
         self.prompts.truncate(self.keep);
         true
+    }
+
+    /// A prompt ending in ? gets question.md after it, pasted ahead of the
+    /// Enter; the bar and history read `:question <prompt>` like a picked
+    /// command. A lone ? is a key some agents take, and a prompt that already
+    /// starts from a command keeps just that one.
+    fn ask(&mut self, text: String) -> String {
+        if text == "?" || !text.ends_with('?') || text.starts_with(':') {
+            return text;
+        }
+        let Some(c) = self.commands.as_deref().and_then(|dir| Command::load(dir, QUESTION)) else { return text };
+        self.pass.extend_from_slice(c.paste_after().as_bytes());
+        format!(":{QUESTION} {text}")
     }
 }
 
@@ -599,7 +712,7 @@ mod tests {
     }
 
     fn buffer() -> KeyBuffer {
-        KeyBuffer::new(2)
+        KeyBuffer::new(2, None)
     }
 
     fn feed(mut kb: KeyBuffer, chunks: &[&[u8]]) -> KeyBuffer {
@@ -617,7 +730,7 @@ mod tests {
         Regex::new(r"\x1b\[[\d;]*m").unwrap().replace_all(s, "").into_owned()
     }
     fn bar(kb: &KeyBuffer, cols: usize) -> Vec<String> {
-        kb.lines(cols).iter().map(|l| strip_sgr(l)).collect()
+        kb.lines(cols, 40).iter().map(|l| strip_sgr(l)).collect()
     }
     fn newest(kb: &KeyBuffer) -> String {
         newest_at(kb, 60)
@@ -1051,6 +1164,129 @@ mod tests {
         let mut r = Run::new();
         r.feed(&["!ls   -la\r"]);
         assert_eq!(r.bangs, ["ls   -la"]);
+    }
+
+    // -- : lines: the command picker
+
+    /// A buffer whose : picker lists `plan` and `commit`.
+    fn picker() -> (Run, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ai-keys-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan.md"), "# planning mode\nno writes\n").unwrap();
+        std::fs::write(dir.join("commit.md"), "# commit all changes\n").unwrap();
+        let r = Run { kb: KeyBuffer::new(2, Some(dir.clone())), passed: Vec::new(), bangs: Vec::new() };
+        (r, dir)
+    }
+
+    const PLAN: &str = "\x1b[200~# planning mode\nno writes\n\n\x1b[201~";
+    const COMMIT: &str = "\x1b[200~# commit all changes\n\n\x1b[201~";
+
+    #[test]
+    fn picking_pastes_the_command_and_the_prompt_follows_it() {
+        let (mut r, dir) = picker();
+        r.feed(&[":", "pl"]);
+        assert!(r.kb.picking());
+        assert_eq!(r.passed(), "", "the search is ours");
+        r.feed(&["\r", "fix it", "\r"]);
+        assert_eq!(r.passed(), format!("{PLAN}fix it\r"));
+        assert_eq!(r.kb.take_sent(), [":plan fix it"]);
+        assert_eq!(newest(&r.kb), "❯ :plan fix it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn arrows_and_ctrl_n_p_move_the_selection_in_every_encoding() {
+        for down in ["\x1b[B", "\x1bOB", "\x1b[1;1B", "\x0e", "\x1b[110;5u"] {
+            let (mut r, dir) = picker();
+            r.feed(&[":", down, "\r"]);
+            assert_eq!(r.passed(), PLAN, "{down:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let (mut r, dir) = picker();
+        r.feed(&[":", "\x1b[B", "\x1b[1;1:3B", "\x1b[A", "\x10", "\r"]);
+        assert_eq!(r.passed(), PLAN, "a key release does not step");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_picker_closes_without_a_trace() {
+        for close in ["\x1b", "\x1b[27u", "\x03", "\x7f"] {
+            let (mut r, dir) = picker();
+            r.feed(&[":", close]);
+            assert!(!r.kb.picking(), "{close:?}");
+            r.feed(&["hi\r"]);
+            assert_eq!(r.passed(), "hi\r", "{close:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn enter_with_no_match_keeps_the_picker_open() {
+        let (mut r, dir) = picker();
+        r.feed(&[":zzz", "\r"]);
+        assert!(r.kb.picking());
+        assert_eq!(r.passed(), "");
+        r.feed(&["\x7f\x7f\x7f", "\r"]);
+        assert_eq!(r.passed(), COMMIT);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_colon_hands_the_line_back_to_the_agent() {
+        let (mut r, dir) = picker();
+        r.feed(&["::q", "\r"]);
+        assert_eq!(r.passed(), ":q\r");
+        assert_eq!(newest(&r.kb), "❯ :q");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn colon_belongs_to_the_child_without_a_folder_or_past_the_first_column() {
+        let mut r = Run::new();
+        r.feed(&[":wq\r"]);
+        assert_eq!(r.passed(), ":wq\r");
+        let (mut r, dir) = picker();
+        r.feed(&["a:b\r", "\x1b[200~:x\x1b[201~\r"]);
+        assert_eq!(r.passed(), "a:b\r\x1b[200~:x\x1b[201~\r");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_picker_takes_the_bar_over() {
+        let (mut r, dir) = picker();
+        r.feed(&[":", "com"]);
+        let b = bar(&r.kb, 60);
+        assert!(b[0].contains(" commands · 1 of 2 "));
+        assert_eq!(b[1], ": com ");
+        assert!(b[2].starts_with("❯ commit  commit all changes"));
+        assert_eq!(b.len(), 4, "rule, search, one row per command");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_question_gets_question_md_after_it_before_the_enter() {
+        let (mut r, dir) = picker();
+        r.feed(&["why?", "\r"]);
+        assert_eq!(r.passed(), "why?\r", "no question.md: nothing added");
+        std::fs::write(dir.join("question.md"), "# answer only\n").unwrap();
+        r.passed.clear();
+        r.feed(&["why?", "\x1b[13u"]);
+        assert_eq!(r.passed(), "why?\x1b[200~\n\n# answer only\x1b[201~\x1b[13u");
+        assert_eq!(r.kb.take_sent(), [":question why?"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lone_question_mark_a_picked_command_and_a_mid_line_one_are_left_alone() {
+        let (mut r, dir) = picker();
+        std::fs::write(dir.join("question.md"), "# answer only\n").unwrap();
+        r.feed(&["?\r", "is it? yes\r", ":", "plan", "\r", "x?", "\r"]);
+        assert_eq!(r.passed(), format!("?\ris it? yes\r{PLAN}x?\r"));
+        let mut r = Run::new();
+        r.feed(&["why?\r"]);
+        assert_eq!(r.passed(), "why?\r", "no folder, no question");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // -- mouse reports and the bar (new)
