@@ -6,7 +6,7 @@ The agent runs inside a wrapper that confines it to the upper rows of the termin
 ## Install
 
 ```sh
-cargo install --path .
+make build
 ```
 
 ## Usage
