@@ -302,6 +302,7 @@ never reaches the agent: it runs in $SHELL inside the wrapper and the bar grows 
 show its output until you type again (!! sends a literal !, a bare ! closes it).
 F10 quits the wrapper and the agent with it (SIGHUP, so it can save its session).
 SIGURG (Herdr's ⌥⌘K) clears screen and scrollback, the bar stays; the agent is not told.
+A pane grown with Herdr's ⌥⌘↵ shrinks back to its old size on the next prompt sent.
 While the agent works on a prompt the bar shows `working 1m12s`; the turn ends once
 it has printed nothing for 3s. -a holds off sleep for exactly that (inside Herdr it
 follows Herdr's own agent status instead).

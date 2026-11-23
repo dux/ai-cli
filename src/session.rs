@@ -559,6 +559,9 @@ impl Session {
                 self.run_bang(cmd);
             }
             let sent = self.keys.take_sent();
+            if !sent.is_empty() {
+                restore_expanded_pane();
+            }
             if let (Some(folder), Some(turn)) = (&self.history, &mut self.turn) {
                 if !sent.is_empty() {
                     turn.start(Instant::now());
@@ -674,6 +677,24 @@ impl Session {
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+/// Herdr's ⌥⌘↵ (~/.config/herdr/expand-pane) grows a pane and leaves its state
+/// file until the pane is put back; the next prompt puts it back. A thread
+/// waits on the script, so the pump never stalls and no zombie is left.
+fn restore_expanded_pane() {
+    if !std::env::temp_dir().join("herdr-expand-pane.json").exists() {
+        return;
+    }
+    let script = format!("{}/.config/herdr/expand-pane", std::env::var("HOME").unwrap_or_default());
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new(script)
+            .arg("--restore")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
 }
 
 fn base64(data: &[u8]) -> String {

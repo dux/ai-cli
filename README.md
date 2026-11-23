@@ -109,6 +109,7 @@ The bar is only redrawn when its own content changes.
   A lone `?`, a prompt that already starts with a picked command, a missing `question.md` and `-x` runs are left alone.
 * F10 quits the wrapper and the agent (SIGHUP, so it can save its session).
 * SIGURG clears the screen and scrollback like iTerm's ⌘K, without telling the agent; the bar stays. Herdr's ⌥⌘K sends it through `~/.config/herdr/clear-pane`, since an outer clear alone would leave the wrapper painting only rows it thinks changed.
+* A pane grown with Herdr's ⌥⌘↵ (`~/.config/herdr/expand-pane`) shrinks back to its old size on the next prompt you send: the wrapper runs `expand-pane --restore` whenever the script's state file in `$TMPDIR` exists.
 * While the agent works on a prompt the bar's rule shows `working 1m12s`.
   A turn starts when you send a prompt and ends once the agent has printed nothing for 3s; agents redraw a spinner or timer the whole time they work.
 * Keyboard protocol changes, cursor shape, scrollback clears, OSC notifications, OSC 1337 `SetUserVar` and synchronized output are forwarded to the real terminal.
