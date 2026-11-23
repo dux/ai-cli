@@ -277,7 +277,7 @@ The switches map to what each CLI actually takes:
   -l, --lines N   prompt rows kept in the bar (1-20, default 3)
   -x, --exec      wrap an arbitrary command instead of an agent (no -c/-f/-b, no AGENTS.md)
   -u, --update    update the agent CLIs, then show model changes
-  -H, --history   print past prompts holding every WORD (any case), newest last
+  -H, --history   print this folder's past prompts holding every WORD (any case), newest last
   -h, --help      this text
 
 Short switches combine: -cf, -cfb, -l5.
@@ -307,13 +307,14 @@ it has printed nothing for 3s. -a holds off sleep for exactly that (inside Herdr
 follows Herdr's own agent status instead).
 AI_WRAP_DEBUG=<file> logs keys and events.
 
-Files live in ~/.config/ai-cli (or $XDG_CONFIG_HOME/ai-cli):
+Files live in ~/.config/ai (or $XDG_CONFIG_HOME/ai):
   config       defaults for agent runs, `key = value` lines, # comments; the command
                line adds to them: tool = codex, full = true, bare = true,
                awake = true, lines = 5 (only lines applies to -x). Every agent
                start sets tool to that agent
-  history.txt  every prompt sent to an agent: `time : folder : prompt`, cut back to
-               its newest half once past 1 MiB
+  history/     one file per folder, / as __ (~/dev/proj is dev__proj.txt): every
+               prompt sent to an agent there, `time : prompt`, cut back to its
+               newest half once past 1 MiB
   models.json  model lists from the last --update
 
 Examples:

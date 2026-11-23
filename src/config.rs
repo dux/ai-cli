@@ -1,5 +1,5 @@
-//! `~/.config/ai-cli` (or `$XDG_CONFIG_HOME/ai-cli`): the defaults file, the
-//! `--update` model cache and the prompt history.
+//! `~/.config/ai` (or `$XDG_CONFIG_HOME/ai`): the defaults file, the
+//! `--update` model cache and the prompt history, one file per folder.
 
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -19,11 +19,18 @@ pub fn dir() -> PathBuf {
     } else {
         PathBuf::from(base)
     };
-    base.join("ai-cli")
+    base.join("ai")
 }
 
-fn history_path() -> PathBuf {
-    dir().join("history.txt")
+/// The prompt history of `folder`; every folder's file sits in `history/`.
+pub fn history_file(folder: &Path) -> PathBuf {
+    dir().join("history").join(history_name(&pane::tilde(folder)))
+}
+
+/// `~/dev/proj` is `dev__proj.txt`, `~` is `~.txt`, `/tmp/x` is `__tmp__x.txt`.
+fn history_name(folder: &str) -> String {
+    let rel = folder.strip_prefix("~/").unwrap_or(folder);
+    format!("{}.txt", rel.replace('/', "__"))
 }
 
 /// Agent run defaults from `config`; command line switches add to them.
@@ -123,31 +130,34 @@ fn parse_defaults(text: &str) -> Result<Defaults, String> {
     Ok(d)
 }
 
-/// One line per prompt: `2026-10-22 14:03:11 : ~/dev/proj : the prompt`.
+/// One line per prompt: `2026-10-22 14:03:11 : the prompt`.
 /// A single append, so wrappers running side by side never interleave lines.
-pub fn append_history(folder: &str, prompt: &str) {
-    let dir = dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+pub fn append_history(file: &Path, prompt: &str) {
+    if file.parent().is_none_or(|dir| std::fs::create_dir_all(dir).is_err()) {
         return;
     }
-    let line = format!("{} : {folder} : {prompt}\n", now());
-    if let Ok(mut f) = File::options().create(true).append(true).open(history_path()) {
+    let line = format!("{} : {prompt}\n", now());
+    if let Ok(mut f) = File::options().create(true).append(true).open(file) {
         let _ = f.write_all(line.as_bytes());
     }
 }
 
-/// `ai -H`: the history lines holding every word, any case, oldest first so
-/// the newest ends up next to the prompt. Time and folder are gray on a tty.
+/// `ai -H`: this folder's history lines holding every word, any case, oldest
+/// first so the newest ends up next to the prompt. The time is gray on a tty.
 pub fn print_history(words: &[String]) -> i32 {
-    let text = std::fs::read_to_string(history_path()).unwrap_or_default();
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("ai: {e}");
+            return 1;
+        }
+    };
+    let text = std::fs::read_to_string(history_file(&cwd)).unwrap_or_default();
     let color = term::is_tty(1);
     let mut out = String::new();
     for line in matching(&text, words) {
-        match line.match_indices(" : ").nth(1) {
-            Some((at, sep)) if color => {
-                let (head, prompt) = line.split_at(at + sep.len());
-                out.push_str(&format!("{GRAY}{head}{RESET}{prompt}\n"));
-            }
+        match line.split_once(" : ") {
+            Some((time, prompt)) if color => out.push_str(&format!("{GRAY}{time} :{RESET} {prompt}\n")),
             _ => {
                 out.push_str(line);
                 out.push('\n');
@@ -165,8 +175,8 @@ fn matching<'a>(text: &'a str, words: &'a [String]) -> impl Iterator<Item = &'a 
 
 /// Called as an agent starts. A line another wrapper appends between the
 /// read and the rename is lost; one prompt in a megabyte of them.
-pub fn trim_history() {
-    trim_in(&history_path(), HISTORY_MAX, HISTORY_KEEP);
+pub fn trim_history(file: &Path) {
+    trim_in(file, HISTORY_MAX, HISTORY_KEEP);
 }
 
 fn trim_in(path: &Path, max: u64, keep: usize) {
@@ -228,11 +238,19 @@ mod tests {
 
     #[test]
     fn search_needs_every_word_in_any_case() {
-        let text = "t : ~/a : Fix the BAR\nt : ~/b : fix tests\nt : ~/a : bar resize\n";
+        let text = "t : Fix the BAR\nt : fix tests\nt : bar resize\n";
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(matching(text, &words(&["bar", "fix"])).collect::<Vec<_>>(), ["t : ~/a : Fix the BAR"]);
-        assert_eq!(matching(text, &words(&["~/a"])).count(), 2);
+        assert_eq!(matching(text, &words(&["bar", "fix"])).collect::<Vec<_>>(), ["t : Fix the BAR"]);
+        assert_eq!(matching(text, &words(&["bar"])).count(), 2);
         assert_eq!(matching(text, &[]).count(), 3);
+    }
+
+    #[test]
+    fn history_names_flatten_the_folder() {
+        assert_eq!(history_name("~/dev/tools/ai"), "dev__tools__ai.txt");
+        assert_eq!(history_name("~"), "~.txt");
+        assert_eq!(history_name("/tmp/x"), "__tmp__x.txt");
+        assert_eq!(history_name("~/dev/a.b"), "dev__a.b.txt");
     }
 
     #[test]

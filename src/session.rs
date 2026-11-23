@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, Write as _};
 use std::os::fd::{AsFd, AsRawFd};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use alacritty_terminal::vte::ansi::{ClearMode, Handler as _, Processor, Timeout}
 use crate::awake::Awake;
 use crate::cli::RunOpts;
 use crate::keys::{self, KeyBuffer};
-use crate::pane::{self, Pane};
+use crate::pane::Pane;
 use crate::probe::{self, Outer};
 use crate::render::Renderer;
 use crate::scan::Scan;
@@ -110,8 +111,8 @@ pub fn run(opts: RunOpts) -> i32 {
     };
 
     handoff::write(&opts.origin);
-    if opts.agent_dir.is_some() {
-        config::trim_history();
+    if let Some(dir) = &opts.agent_dir {
+        config::trim_history(&config::history_file(dir));
         config::remember_tool(&opts.argv[0]);
     }
     let code = match Session::start(&opts, size) {
@@ -154,8 +155,8 @@ struct Session {
     last_frame: Instant,
     exit: Option<i32>,
     trace: Option<File>,
-    /// `~/dev/proj` form of the folder prompts are logged under; None for -x.
-    history: Option<String>,
+    /// The folder's history file prompts are logged to; None for -x.
+    history: Option<PathBuf>,
     /// None for -x: a plain command has no prompts to time.
     turn: Option<Turn>,
     working: bool,
@@ -223,7 +224,7 @@ impl Session {
             last_frame: Instant::now(),
             exit: None,
             trace,
-            history: opts.agent_dir.as_deref().map(pane::tilde),
+            history: opts.agent_dir.as_deref().map(config::history_file),
             turn: opts.agent_dir.as_ref().map(|_| Turn::default()),
             working: false,
             started: Instant::now(),

@@ -33,7 +33,7 @@ No tool name holds a digit, so a first word with one is the `MODEL` for the tool
 | `-l`, `--lines N` | prompt rows kept in the bar (1-20, default 3) |
 | `-x`, `--exec` | wrap an arbitrary command instead of an agent |
 | `-u`, `--update` | update the agent CLIs, then show model changes |
-| `-H`, `--history` | print past prompts holding every word (any case), newest last |
+| `-H`, `--history` | print this folder's past prompts holding every word (any case), newest last |
 | `-h`, `--help` | full help |
 
 Short switches combine: `-cf`, `-cfb`, `-l5`.
@@ -132,15 +132,15 @@ The original command line is written to `$XDG_STATE_HOME/llm-wrap/<pid>` (defaul
 
 `ai --update` runs each CLI's own updater (`claude/codex/grok/omp update`, `opencode upgrade`) and reports old -> new versions.
 It then re-reads the model lists and shows what appeared or disappeared since the last run.
-The model cache is `~/.config/ai-cli/models.json`.
+The model cache is `~/.config/ai/models.json`.
 A TOOL prefix limits the update to that one tool.
 
 ## Files
 
-Everything lives in `~/.config/ai-cli/` (or `$XDG_CONFIG_HOME/ai-cli/`):
+Everything lives in `~/.config/ai/` (or `$XDG_CONFIG_HOME/ai/`):
 
 * `config` - defaults for agent runs
-* `history.txt` - every prompt sent to an agent
+* `history/` - every prompt sent to an agent, one file per folder
 * `models.json` - model lists from the last `--update`
 
 ### Config
@@ -160,20 +160,28 @@ Every agent start sets `tool` to that agent, leaving the other lines as they are
 The switches can only be turned on, so a `true` here applies to every run.
 `commands` is the picker's folder, `~/dev/ai/command` when not set.
 Only `lines` applies to `-x` runs.
-A bad line stops `ai` with its line number, e.g. `ai: ~/.config/ai-cli/config:3: unknown key "x"`.
+A bad line stops `ai` with its line number, e.g. `ai: ~/.config/ai/config:3: unknown key "x"`.
 
 ### History
 
-One line per prompt, as `time : folder : prompt`:
+Each folder an agent runs in gets its own file in `history/`, named after the folder with `/` as `__`:
+
+| Folder | File |
+| --- | --- |
+| `~/dev/tools/ai` | `dev__tools__ai.txt` |
+| `~` | `~.txt` |
+| `/tmp/x` | `__tmp__x.txt` |
+
+One line per prompt, as `time : prompt`:
 
 ```
-2026-10-22 14:03:11 : ~/dev/tools/ai : fix the bar redraw on resize
+2026-10-22 14:03:11 : fix the bar redraw on resize
 ```
 
 `!` lines, blank lines and `-x` runs are not logged.
 Multi-line prompts are flattened the same way as in the bar (`\ ` marks a line break).
-Once the file passes 1 MiB it is cut back to its newest 512 KiB of whole lines when the next agent starts.
-`ai -H` searches it.
+Once a file passes 1 MiB it is cut back to its newest 512 KiB of whole lines when the next agent starts in that folder.
+`ai -H` searches the current folder's file.
 
 ## Debugging
 
